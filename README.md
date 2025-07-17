@@ -1,6 +1,6 @@
 ---
 
-```
+
 # 🔐 PortLock - Real-Time USB Port Protection Tool
 
 **PortLock** is a real-time USB intrusion detection and locking system designed for Windows. It monitors USB devices being plugged in and only allows those that are password-authorized or whitelisted by Serial/Vendor ID. Unauthorized USBs are blocked, logged, and can optionally be ejected or disabled entirely.
