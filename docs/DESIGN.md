@@ -1,7 +1,7 @@
 # PortLock — design decisions
 
 This is the authoritative design for PortLock. It records *what was decided and why*.
-`ARCHITECTURE.md` maps it onto modules, `ENFORCEMENT.md` documents each operating-system
+`ARCHITECTURE.md` maps it onto modules, `docs/enforcement/` documents each operating-system
 mechanism and its limits, `THREAT_MODEL.md` states what PortLock does and does not defend.
 
 Where code and this document disagree, that is a bug in one of them: fix it and say which.
@@ -30,14 +30,17 @@ A PortLock that detects and decides but cannot enforce is a monitor, and it says
   backing the system volume are *protected*. Every enforcement call passes through one
   choke point (`SafeEnforcer`) that refuses to act on a protected device, whatever policy
   says. Enforcing against HID devices is off unless two separate settings are enabled.
-  Input devices present when the service starts are remembered by fingerprint and stay
-  protected, so re-plugging the operator's own keyboard can never lock them out.
+  The operator's own input devices are **enrolled** by an authenticated command, which
+  records each one's fingerprint and port. An enrolled device stays protected when it is
+  re-plugged into the same port, so the operator's keyboard never locks them out. Merely
+  being connected when the service starts confers nothing: otherwise anyone who can cause
+  a restart could turn a hostile device into a protected one.
 
-  One deliberate exception: a device that pairs **storage with an input interface** is not
-  covered by the keyboard protection. It is treated as storage, and the default policy
-  denies it and raises an alert, because that is the shape of a "BadUSB" stick. A device
-  of that shape that was already present at start-up stays protected like any other
-  start-up input device.
+  The category protection covers only devices whose every interface is an input device or
+  a hub. A device that puts **any other function beside an input interface** (storage,
+  network, serial, imaging, vendor-specific) is the shape of a "BadUSB" or network-tap
+  implant; it goes to policy like any other device, and the default policy denies it and
+  raises an alert.
 
   The cost of this principle is stated plainly: with default settings PortLock does **not**
   stop a malicious device that presents itself only as a keyboard. It records and alerts
@@ -101,9 +104,10 @@ On arrival, and for every device present at start:
 1. Build the `UsbDevice`, compute the fingerprint, audit `device.connected`.
 2. Safety check. A protected device is allowed and never enforced against.
 3. Evaluate. Precedence, highest first:
-   **safety > lockdown > policy `deny` > grants and trust > other policy rules > policy default.**
-   A grant upgrades `pending` to `allow` or `read_only`. It does not override an explicit
-   `deny` rule; to permit such a device, change the policy.
+   **safety > lockdown > scan detection > first matching policy rule > grant > policy default.**
+   The first matching rule is final whether it says `allow`, `read_only` or `deny`. A grant
+   acts only on a `pending` outcome: it never widens what a rule decided and never removes
+   a scan requirement. To permit a device a rule denies, change the policy.
 4. Enforce the decision if the mode is `enforce`; otherwise log `would_enforce`.
 5. If access was granted and policy asks for it, scan the mounted volumes. A detection can
    downgrade the decision to `read_only` or `deny`.
@@ -133,7 +137,7 @@ Two tiers, and the difference matters:
 | Eject | sysfs `remove` | `CM_Request_Device_Eject` |
 
 Exact paths, values, privileges, kernel and Windows version requirements and failure modes
-are in `ENFORCEMENT.md`, each with a reference to vendor documentation.
+are in `docs/enforcement/linux.md` and `docs/enforcement/windows.md`, each with a reference to vendor documentation.
 
 All OS access goes through thin seams (`SysfsIO`, `RegistryIO`, `CfgMgrAPI`,
 `CommandRunner`) so the enforcement logic runs unmodified against fakes in tests.
@@ -162,7 +166,7 @@ audited with the old and new content hash.
 
 ## 8. Authentication and grants
 
-- Passwords: `hashlib.scrypt`, N = 2^15, r = 8, p = 1, 16-byte salt, constant-time compare,
+- Passwords: `hashlib.scrypt`, N = 2^17, r = 8, p = 1, 16-byte salt, constant-time compare,
   transparent re-hash when parameters are raised. Minimum length 12; known-bad passwords
   including the prototype's default are refused.
 - Lockout: five consecutive failures start an exponential delay (30 s doubling to 15 min)
@@ -222,8 +226,9 @@ it carries the most safeguards:
 ## 12. Console
 
 - **CLI** for everything. Privileged commands ask for the administrator password.
-- **Local HTTP API** on `127.0.0.1`, session cookie (`HttpOnly`, `SameSite=Strict`) plus a
-  CSRF header on state-changing requests, `Host` allowlist against DNS rebinding.
+- **Local HTTP API** on `127.0.0.1`. Every request carries a bearer token in the
+  `Authorization` header; there are no cookies, because cookies on `127.0.0.1` are shared
+  with every other local port. `Host` allowlist against DNS rebinding.
 - **Web console** served by the same process: static files, no build step.
 - `portlock simulate` runs the complete pipeline against the fake backend, so the product
   can be explored on any machine without touching a real device.
@@ -239,3 +244,99 @@ it carries the most safeguards:
 - Tests marked `hardware` read real device information without changing anything and are
   skipped unless asked for.
 - The suite runs on Windows and on Linux.
+
+## 14. Changes adopted after design review
+
+Two independent reviews (operating-system security; application security and
+reliability) were run against sections 1 to 13 before the service was built. The changes
+below were adopted. **Where this section conflicts with anything above, or with
+`ARCHITECTURE.md`, this section wins.**
+
+### Protection
+
+1. **Enrolment, not presence.** Being connected at start-up confers nothing. Input devices
+   are enrolled by an authenticated command (`portlock enroll`, offered during `init`). An
+   enrolment stores fingerprint and port path and protects a device only when both match.
+   A second device presenting an enrolled fingerprint while the first is connected is
+   denied and raises an alert.
+2. **Input-only.** Category protection applies only to a device whose every interface is
+   input (HID) or hub. Input beside any other function goes to policy; the default policy
+   denies it with an alert.
+3. **Built in** means directly on a root-hub port that firmware marks as not
+   user-accessible. A device behind an external hub is never built in, whatever that hub
+   claims about its own ports.
+4. **Storage-like.** Mass storage and imaging devices (phones and cameras in MTP or PTP
+   mode) are both in the default enforcement scope and both count as removable storage
+   during lockdown.
+5. **Scope** is part of the design: `storage` (the default), `storage_and_unknown`,
+   `all_except_protected`. The default covers mass storage, imaging devices, and every
+   device that puts another function beside an input interface, so the default policy's
+   denial of those devices is actually enforced. Anything outside the scope is reported as
+   not enforced, never as protected.
+6. **Port hold-down.** More than a configured number of arrivals on one port within a
+   short window holds that port blocked for a cool-down and coalesces the audit events, so
+   a device cannot replay the reactive window indefinitely by re-enumerating.
+7. **Device text is untrusted.** Every string a device supplies has control and format
+   characters replaced and its length capped before it is stored, and consoles render it
+   as text only.
+
+### Decision
+
+8. Precedence is as stated in section 5 above (already corrected there).
+9. `scan: required` means: admit read-only, scan every volume, and apply the decided
+   access only on a clean verdict. An incomplete or failed scan leaves the device read-only
+   and raises an alert. Scanning defends against bad files on an honest device; a hostile
+   device can serve different content after the scan, and the documentation says so.
+10. The pipeline order is decide, journal, enforce, audit. A failure to store or audit
+    never skips enforcement. In enforce mode a non-protected device that cannot be
+    evaluated is treated as `pending`.
+11. Revoking a device that has mounted volumes switches it to read-only, attempts a clean
+    eject with a short timeout, and only then blocks it. The audit record says whether the
+    removal was clean.
+12. Expiries are evaluated against the later of the clock and the newest audit timestamp,
+    so setting the clock back does not revive an expired grant or rule; the discrepancy
+    raises an alert. A lockdown counts down on the monotonic clock and persists the time
+    remaining.
+13. Temporary grants have a ceiling (24 h for operators; 30 days by default for
+    administrators). A low-confidence fingerprint may only receive a `once` grant or a
+    temporary grant of at most 24 h, bound to the port. `once` binds to a connection id
+    supplied by the backend, because the OS instance id survives a re-plug.
+
+### Enforcement and lockdown
+
+14. Tier claims, corrected. On Windows, Device Installation Restrictions stop only devices
+    that were never installed on the machine; disabling the device node on every arrival
+    is the backstop. Reactive read-only does not take away write access that a mount
+    already has; read-only is dependable only as a standing baseline from which approved
+    devices are released (`baseline_read_only`).
+15. **Commit-confirm.** Switching to enforce, widening the scope, turning on default-deny
+    and engaging lockdown each list what would be blocked, apply the change, and roll it
+    back unless it is confirmed within 60 s over the same channel. An operator whose only
+    way in is a USB network adapter or serial console gets it back automatically.
+16. **Dead-man outside the process.** When default-deny or lockdown is engaged, a one-shot
+    operating-system timer is armed to run `portlock recover` at expiry and is cancelled on
+    lift or renewal, so the safety does not depend on the service staying alive.
+17. Journal entries are typed and are validated on replay against a fixed list of targets.
+    `restore` reverts a value only if it still equals what PortLock applied; otherwise it
+    leaves it and audits that someone else changed it. `portlock recover` needs operating
+    system administrator rights and leaves an audit record.
+18. The state and configuration directories must be private. The service sets and verifies
+    ownership and permissions at every start and refuses enforce mode otherwise. The
+    kill-switch file is honoured only inside a directory verified to be private.
+19. On Linux only `usbcore.authorized_default=0` on the kernel command line is preventive
+    from boot. `portlock doctor` reports whether it is set.
+
+### API, authentication, audit, storage
+
+20. Bearer tokens, no cookies (section 12, already corrected). The listener refuses
+    address reuse. The console ships a strict content security policy. The CLI
+    authenticates the service through a secret in the private runtime file.
+21. At most two password verifications run at once on the network path. The network
+    lockout never blocks the local elevated CLI or recovery codes, so it cannot be used to
+    keep the administrator out.
+22. The audit MAC key ratchets forward with every record and the old key is erased, so
+    someone who takes over the machine later cannot re-MAC earlier records. The head of
+    the chain is also written to a separate file. The local MAC protects only against a
+    writer who cannot read the current key, and the documentation says so.
+23. The database is checked at start. A damaged file is renamed aside, never deleted, and
+    the first record of the new log names the old file's hash and last known head.
