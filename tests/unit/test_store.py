@@ -620,6 +620,35 @@ def test_discard_volatile_closes_only_that_device_s_volatile_records(
     }
 
 
+def test_a_windows_disk_record_is_volatile_so_the_next_disk_does_not_inherit_it(
+    journal: RecoveryJournal,
+) -> None:
+    from portlock.core.store import VOLATILE_KINDS
+    from portlock.guard.base import JournalKind
+
+    assert JournalKind.WIN_DISK_READ_ONLY.value in VOLATILE_KINDS
+    disk = r"\\.\PhysicalDrive2"
+    entry = JournalEntry(JournalKind.WIN_DISK_READ_ONLY, disk, "0", "1")
+    first = r"USB\VID_1209&PID_0001\TESTA0001"
+    second = r"USB\VID_1209&PID_0002\TESTB0002"
+    with journal.recording(scope=first, action=Action.READ_ONLY, fingerprint=None):
+        journal.write_ahead(entry)
+        journal.record(
+            EnforcementResult(Action.READ_ONLY, ok=True, mechanism="disk", undo=(entry,))
+        )
+    # The first stick leaves: the attribute went away with its disk, so the record does too.
+    assert len(journal.discard_volatile(first, reason="device left")) == 1
+    assert journal.open_records() == []
+    # The second stick is given the same disk number and is made read-only: its own record.
+    with journal.recording(scope=second, action=Action.READ_ONLY, fingerprint=None):
+        journal.write_ahead(entry)
+        journal.record(
+            EnforcementResult(Action.READ_ONLY, ok=True, mechanism="disk", undo=(entry,))
+        )
+    assert journal.has_open(scope=second, actions={Action.READ_ONLY})
+    assert not journal.has_open(scope=first)
+
+
 def test_a_torn_last_line_and_garbage_lines_are_skipped_and_counted(
     journal_path: Path, clock: FakeClock
 ) -> None:

@@ -86,9 +86,16 @@ JOURNAL_FILE_NAME = "journal.jsonl"
 
 #: The scope of a journal record that concerns no single device.
 GLOBAL_SCOPE = "global"
-#: Journal kinds the operating system forgets when the device disconnects.
+#: Journal kinds the operating system forgets when the device disconnects. A Windows disk
+#: attribute belongs here too: it is set without ``Persist`` and goes away with the disk,
+#: and the next disk may be given the same ``PhysicalDriveN``.
 VOLATILE_KINDS: frozenset[str] = frozenset(
-    {JournalKind.SYSFS_AUTHORIZED.value, JournalKind.BLOCK_READ_ONLY.value, JournalKind.FAKE.value}
+    {
+        JournalKind.SYSFS_AUTHORIZED.value,
+        JournalKind.BLOCK_READ_ONLY.value,
+        JournalKind.WIN_DISK_READ_ONLY.value,
+        JournalKind.FAKE.value,
+    }
 )
 #: Journal kinds whose value is shared by several devices; always stored with global scope.
 GLOBAL_KINDS: frozenset[str] = frozenset(

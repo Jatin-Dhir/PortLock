@@ -133,9 +133,13 @@ to `main`, nothing was force-pushed, and no pull request was opened.
 
 ## 10. Remaining issues
 
-- **No independent code review of the enforcers, lockdown manager, service, API or CLI.**
-  The design was reviewed twice; the code of those layers was not, because the usage
-  ceiling for this session was reached.
+- **The enforcers, lockdown manager, service, API and CLI have now had an independent code
+  review** (16 November 2026: two reviewers, one with a security lens and one with a
+  correctness lens). It produced 17 findings: 4 high, 9 medium and 4 low. 16 are fixed, each
+  with a regression test. 1 is fixed in part and its remainder is open: `portlock recover`
+  and a kill switch found at start still readmit every present device after default-deny,
+  because they run without the database. Nothing was run against a real device. See
+  `docs/REVIEW.md`.
 - `portlock service print-unit` and `print-task` print their install steps with `\x0a`
   instead of line breaks. The generated files themselves are correct.
 - The optional sink that publishes signed events to a ClawNet node exists and is tested

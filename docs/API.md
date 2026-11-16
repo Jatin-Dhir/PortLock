@@ -48,7 +48,12 @@ Contents: 1 conventions · 2 transport rules · 3 errors · 4 shared objects ·
 Applied to every request, in this order, before anything else is looked at.
 
 1. **Limits.** At most 32 requests in flight; the 33rd is answered `503 server_busy` by
-   the accept thread, without a body being read and without a thread being started.
+   the accept thread, without a body being read and without a thread being started. When
+   all 32 are taken and one of them has still not sent a complete request line and headers,
+   the one that has waited longest is disconnected and its place goes to the new
+   connection, so a program that opens connections and sends nothing cannot keep the
+   command line and the console out; `503` is answered only when all 32 have sent their
+   requests.
    Request line and headers at most 16 KiB (`431`); body at most 2 MiB (`413
    body_too_large`, decided from `Content-Length` before the body is read); 30 seconds to
    send the whole request (a slower client is disconnected); 10 seconds for any one write
@@ -1105,7 +1110,11 @@ recovery codes. Request: exactly one of `password` (string) or `recovery_code` (
 belonging to the session's own account. Response 200: `lockdown` (state `idle`),
 `summary` (as engage: what was released, what stays blocked because policy still says
 so; or null). Errors: 401 `reauthentication_failed`, 429 `locked_out`, 409
-`lockdown_not_active`.
+`lockdown_not_active`. A request that carries the command-line secret (5.7) has its
+password checked on the **local** channel, which a network lockout never refuses
+(DESIGN §14.21), so failed logins by another program cannot keep the administrator at the
+elevated command line from lifting; `portlock lockdown lift` sends the secret. Without it
+the password is checked on the network channel and `locked_out` applies.
 
 ```json
 // request
@@ -1218,8 +1227,9 @@ all). No body. Response 200: `change` (Change), `confirmed` (true). Errors: 404
 `no_pending_change`, 409 `wrong_channel`, `confirmation_expired` (the change was rolled
 back), `not_ready`.
 
-**`POST /changes/{change_id}/cancel`.** Same permissions. Rolls the change back now. No
-body. Response 200: `change`, `cancelled` (true). 404 `no_pending_change`.
+**`POST /changes/{change_id}/cancel`.** Same permissions, and for a lockdown also
+`lift_lockdown`, because cancelling a lockdown that waits for confirmation lifts it. Rolls
+the change back now. No body. Response 200: `change`, `cancelled` (true). 404 `no_pending_change`.
 
 ```json
 {"change": {"id": "dc5439cc1af20f93", "kind": "lockdown", "...": "a Change"}, "confirmed": true}
@@ -1282,10 +1292,18 @@ lockouts. Request: `new_password`. Response 200: `user`. Errors: 400 `password_p
 
 **`POST /users/{username}/recovery-codes` — `manage_users`, or the account's own
 session.** Issues a fresh set and invalidates the previous one. The codes are returned
-**once** and stored only as digests. No body. Response 200: `username`, `codes`
-(array<string>, 8 codes), `issued_at` (time).
+**once** and stored only as digests. A recovery code can lift a lockdown and reset a
+password, so a session token alone is not enough: the request carries the **caller's own
+current password** (also when an administrator issues codes for someone else). Request:
+`current_password` (string, required). Response 200: `username`, `codes` (array<string>, 8
+codes), `issued_at` (time). Errors: 400 `invalid_request` (no `current_password`), 401
+`reauthentication_failed`, 429 `locked_out`, `rate_limited` or `busy` (the password check
+is counted and limited like a login, and is not itself a sign-in).
 
 ```json
+// request
+{"current_password": "correct horse battery staple"}
+// response 200
 {"username": "alice", "issued_at": "2026-01-01T09:25:00.000000Z",
  "codes": ["ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345", "…7 more…"]}
 ```
@@ -1444,7 +1462,7 @@ there are no cookies and no CSRF tokens (DESIGN §14.20).
 | POST | `/lockdown/lift` | `lift_lockdown` | password or recovery code in the body |
 | GET | `/changes` | `view` | |
 | POST | `/changes/{change_id}/confirm` | `view` | the permission of the change: `engage_lockdown` (lockdown) or `change_mode` |
-| POST | `/changes/{change_id}/cancel` | `view` | as confirm |
+| POST | `/changes/{change_id}/cancel` | `view` | as confirm; a lockdown also needs `lift_lockdown` |
 | GET | `/mode` | `view` | |
 | PUT | `/mode` | `change_mode` | |
 | GET | `/scope` | `view` | |
@@ -1460,7 +1478,7 @@ there are no cookies and no CSRF tokens (DESIGN §14.20).
 | POST | `/users/{username}/disable` | `manage_users` | |
 | POST | `/users/{username}/enable` | `manage_users` | |
 | POST | `/users/{username}/password` | `manage_users` | |
-| POST | `/users/{username}/recovery-codes` | session | `manage_users`, unless it is the caller's own account |
+| POST | `/users/{username}/recovery-codes` | session | `manage_users`, unless it is the caller's own account; the caller's `current_password` in the body |
 | POST | `/users/{username}/unlock` | `manage_users` | |
 | DELETE | `/users/{username}` | `manage_users` | |
 | GET | `/events` | `view` | |

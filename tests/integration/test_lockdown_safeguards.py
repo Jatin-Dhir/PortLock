@@ -50,7 +50,7 @@ def test_lockdown_blocks_storage_and_holds_new_devices_but_never_touches_protect
         assert harness.view(protected).state is ConnectionState.PROTECTED
     armed_at, argv = harness.timer.armed[LOCKDOWN_TIMER]
     assert argv == RECOVER_ARGV
-    assert armed_at == harness.clock.now() + timedelta(minutes=30)
+    assert armed_at == harness.clock.now() + timedelta(minutes=30, seconds=30)  # after the expiry
     # A new stick is refused from the first instant; a new keyboard is admitted.
     harness.plug(flash_drive(instance_id="test/5-1", bus_path="5-1", serial="TEST00050001"))
     assert harness.enforcer.is_blocked("test/5-1")

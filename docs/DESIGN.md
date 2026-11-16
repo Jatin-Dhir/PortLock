@@ -340,3 +340,35 @@ below were adopted. **Where this section conflicts with anything above, or with
     writer who cannot read the current key, and the documentation says so.
 23. The database is checked at start. A damaged file is renamed aside, never deleted, and
     the first record of the new log names the old file's hash and last known head.
+
+### After the code review of the upper layers (16 November 2026)
+
+`docs/REVIEW.md` lists every finding. Four of them changed what the design says; where
+these conflict with anything above, these win.
+
+24. **PortLock admits only what it holds back.** Default-deny (a lockdown, or the standing
+    setting) leaves new devices unauthorized. PortLock authorizes a device only if it
+    blocked it, or if it arrived while default-deny was in force and has not been admitted
+    yet. A device that was already present, or that someone else disabled (Device Manager,
+    an administrator, USBGuard), is left as that person left it, and stopping the service
+    or the kill switch does not re-enable it. `portlock recover` runs without the database
+    and cannot tell the two apart, so it readmits every present device, hubs first, because
+    a keyboard behind an unauthorized dock would otherwise stay unusable.
+25. **The dead-man timer fires after the service, and never writes the kill switch.** The
+    operating-system timer for a lockdown is armed 30 seconds after its expiry (14.16 said
+    "at expiry"), so the service's own lift, about a second after the expiry, comes first.
+    The timer runs `portlock recover --dead-man`: with a running service it does nothing;
+    with none it restores the journal and leaves the marker, but does not create
+    `DISABLE_ENFORCEMENT`, so a lockdown that ended while the machine was off does not leave
+    enforcement off for good. An operator's own `portlock recover` still creates it.
+26. **Recovery codes and lockdown lifts need the same proof as the password.** Issuing
+    recovery codes needs the caller's own current password, because a code can lift a
+    lockdown and reset a password; a session token alone cannot. Cancelling a lockdown that
+    awaits confirmation lifts it, so it needs `lift_lockdown`, not only `engage_lockdown`.
+    A lift sent with the command-line secret has its password checked on the local channel,
+    so the network lockout never blocks it (14.21 already said so; the lift path did not).
+27. **The expiry high-water mark is the highest audit timestamp**, not the timestamp of the
+    last record, so a clock set back and a restart do not bring back an expired rule or
+    grant (14.12). A connection that survives a restart keeps the time it really arrived,
+    when the backend's connection token proves it is the same connection, so a lockdown's
+    exemption for devices connected before it began survives a restart.

@@ -4,7 +4,7 @@ import { api, seg, setToken } from "./api.js";
 import { h } from "./dom.js";
 import { timeEl } from "./fmt.js";
 import { state } from "./store.js";
-import { button, confirmDialog, copyButton, field, formDialog, infoDialog, kv, toast } from "./ui.js";
+import { button, copyButton, field, formDialog, infoDialog, kv, toast } from "./ui.js";
 
 /** Show freshly issued recovery codes. They are returned once and kept only as digests. */
 export function showRecoveryCodes(reply) {
@@ -19,6 +19,32 @@ export function showRecoveryCodes(reply) {
       h("div", { class: "row" }, copyButton(codes.join("\n"), "Copy all"), h("span", { class: "hint" }, "Store them somewhere other than this computer.")),
     ),
   );
+}
+
+/**
+ * Issue a new set of recovery codes for `username` and show it. The signed-in person types
+ * their own current password first: a recovery code can lift a lockdown and reset a
+ * password, so an open session alone is not enough to create one.
+ */
+export async function issueRecoveryCodes(username, consequence) {
+  const current = h("input", { type: "password", autocomplete: "current-password" });
+  let reply = null;
+  const done = await formDialog({
+    title: `New recovery codes for ${username}`,
+    submitLabel: "Issue new codes",
+    content: h(
+      "div",
+      { class: "stack" },
+      h("p", { class: "muted" }, consequence),
+      field("Your current password", current, "Asked again because a recovery code can lift a lockdown or reset a password."),
+    ),
+    onSubmit: async () => {
+      reply = await api.post(`/users/${seg(username)}/recovery-codes`, { current_password: current.value });
+      current.value = "";
+      return true;
+    },
+  });
+  if (done && reply !== null) showRecoveryCodes(reply);
 }
 
 export function openAccount({ onPasswordChanged }) {
@@ -37,15 +63,7 @@ export function openAccount({ onPasswordChanged }) {
       { class: "row" },
       button("Change password", { onClick: () => changePassword(onPasswordChanged) }),
       button("Issue new recovery codes", {
-        onClick: async () => {
-          const ok = await confirmDialog({
-            title: "Issue new recovery codes?",
-            message: "The eight codes you have now stop working. The new ones are shown once.",
-            confirmLabel: "Issue new codes",
-          });
-          if (!ok) return;
-          showRecoveryCodes(await api.post(`/users/${seg(me.username)}/recovery-codes`));
-        },
+        onClick: () => issueRecoveryCodes(me.username, "The eight codes you have now stop working. The new ones are shown once."),
       }),
     ),
   );

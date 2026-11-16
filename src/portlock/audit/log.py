@@ -1107,6 +1107,26 @@ class AuditLog:
         row = self._db.query_one("SELECT COUNT(*) AS n FROM audit_log")
         return int(row["n"]) if row is not None else 0
 
+    def newest_timestamp(self) -> datetime | None:
+        """The latest ``ts`` of any record, ``None`` for an empty log.
+
+        This is the highest *time*, not the time of the last record: after the clock was
+        set back, records written later carry earlier times. Expiries are judged against
+        this value (DESIGN 14.12), so it is what a restart must learn.
+
+        Raises:
+            AuditError: if a stored timestamp is malformed (``code == "audit_corrupt"``).
+        """
+        row = self._db.query_one("SELECT MAX(ts) AS ts FROM audit_log")
+        if row is None or row["ts"] is None:
+            return None
+        try:
+            return parse_utc_iso(str(row["ts"]))
+        except ValueError as exc:
+            raise AuditError(
+                "the newest audit timestamp is malformed", code="audit_corrupt"
+            ) from exc
+
     def head(self) -> tuple[int, str]:
         """``(seq, hash)`` of the newest record; ``(0, GENESIS_HASH)`` for an empty log.
 

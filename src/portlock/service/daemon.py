@@ -193,8 +193,9 @@ def verify_cli_secret(expected: str, candidate: object) -> bool:
 class AccountCredentials:
     """``lockdown.manager.CredentialCheck`` on the account store: administrators only.
 
-    A password is checked on the network channel (the API is the network path); a
-    recovery code is spent. Any failure says no.
+    A password is checked on the network channel (the API is the network path) unless
+    the credential came over the elevated local command line; a recovery code is spent.
+    Any failure says no.
     """
 
     def __init__(self, accounts: AccountStore) -> None:
@@ -205,7 +206,8 @@ class AccountCredentials:
         if user is None or not user.enabled or user.role is not Role.ADMIN:
             return False
         if credential.kind == "password":
-            result = self._accounts.authenticate(actor, credential.secret, channel=Channel.NETWORK)
+            channel = Channel.LOCAL if credential.local else Channel.NETWORK
+            result = self._accounts.authenticate(actor, credential.secret, channel=channel)
             return bool(result.ok)
         if credential.kind == "recovery_code":
             return self._accounts.use_recovery_code(

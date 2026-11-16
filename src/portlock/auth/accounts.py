@@ -827,6 +827,21 @@ class AccountStore:
         """
         return self._attempt_password(username, password, _channel(channel), login=True)
 
+    def verify_password(
+        self, username: str, password: str, *, channel: Channel | str = Channel.NETWORK
+    ) -> AuthResult:
+        """Check a password to confirm a sensitive action by an already signed-in user.
+
+        Exactly :meth:`authenticate` (lockout, busy refusal, failure counting and the
+        rest), except that a success is not a sign-in: it records no login and does not
+        touch ``last_login_at``.
+
+        Raises:
+            AuthError: code ``invalid_channel`` (a programming error in the caller).
+            StoreError: if the database fails or the account record is corrupt.
+        """
+        return self._attempt_password(username, password, _channel(channel), login=False)
+
     def change_password(
         self,
         username: str,

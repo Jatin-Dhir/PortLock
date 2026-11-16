@@ -369,10 +369,19 @@ class _Http:
 class _Service:
     """A verified, logged-in connection to the service."""
 
-    def __init__(self, http_client: _Http, token: str | None, password: str | None) -> None:
+    def __init__(
+        self,
+        http_client: _Http,
+        token: str | None,
+        password: str | None,
+        secret: str | None = None,
+    ) -> None:
         self.http = http_client
         self.token = token
         self.password = password
+        # The runtime file's secret: a request that carries it is the elevated local
+        # command line, whose credential checks the network lockout never refuses.
+        self.secret = secret
         self.ping: dict[str, Any] = {}
 
     def call(
@@ -382,8 +391,13 @@ class _Service:
         *,
         body: Mapping[str, Any] | None = None,
         query: Mapping[str, Any] | None = None,
+        local: bool = False,
     ) -> Any:
-        status, data = self.http.request(method, path, body=body, query=query, token=self.token)
+        """One call. ``local`` also presents the secret, for a call that checks a credential."""
+        headers = {CLI_SECRET_HEADER: self.secret} if local and self.secret else None
+        status, data = self.http.request(
+            method, path, body=body, query=query, token=self.token, headers=headers
+        )
         if 200 <= status < 300:
             return data
         error = (data or {}).get("error") if isinstance(data, dict) else None
@@ -574,7 +588,7 @@ class _Cli:
                 )
             raise _Failure(EXIT_AUTH, f"the login was refused (HTTP {status})")
         token = str(data["token"])
-        svc = _Service(http_client, token, password)
+        svc = _Service(http_client, token, password, endpoint.secret)
         svc.ping = ping
         try:
             yield svc
@@ -759,6 +773,12 @@ class _Cli:
         kill_switch = Path(config.paths.kill_switch_file)
         lock = InstanceLock(state_dir / LOCK_FILE_NAME)
         running = not lock.acquire()
+        if args.dead_man and running:
+            # The timer is the backstop for a service that died. This one is alive and ends
+            # its own lockdown (and its commit-confirm windows) on its next tick; writing
+            # the kill-switch file now would switch enforcement off for good.
+            self.say("The service is running: it ends the lockdown itself. Nothing was changed.")
+            return EXIT_OK
         try:
             journal = RecoveryJournal(journal_path, clock=clock)
             enforcer = self.env.create_enforcer(config, journal.write_ahead)
@@ -770,8 +790,9 @@ class _Cli:
                     EXIT_AUTH,
                     "portlock recover needs administrator (root) rights; nothing was changed",
                 )
-            ensure_private_dir(kill_switch.parent)
-            atomic_write_bytes(kill_switch, b"created by 'portlock recover'\n", private=True)
+            if not args.dead_man:
+                ensure_private_dir(kill_switch.parent)
+                atomic_write_bytes(kill_switch, b"created by 'portlock recover'\n", private=True)
             if running:
                 return self._recover_through_service(journal_path, kill_switch)
             live = SafeEnforcer(enforcer, lambda: SafetyContext(), dry_run=False)
@@ -807,7 +828,12 @@ class _Cli:
         )
         for target, reason in report.failed:
             self.say(f"  could not restore {_text(target)}: {_text(reason)}")
-        self._after_recover(kill_switch)
+        if args.dead_man:
+            # No kill switch: the next start finds the marker, ends the lockdown it
+            # describes as recovered and enforces again.
+            self.say("Enforcement is not disabled; the service resumes it when it starts.")
+        else:
+            self._after_recover(kill_switch)
         return EXIT_FAILED if report.failed else EXIT_OK
 
     def _recover_through_service(self, journal_path: Path, kill_switch: Path) -> int:
@@ -1464,7 +1490,7 @@ class _Cli:
                     body = {"recovery_code": self._secret(args, "Recovery code: ")}
                 else:
                     body = {"password": svc.password}
-                data = svc.call("POST", "/lockdown/lift", body=body)
+                data = svc.call("POST", "/lockdown/lift", body=body, local=True)
                 self.emit(args, data, lambda d: self.say("The lockdown is lifted."))
         return EXIT_OK
 
@@ -1609,7 +1635,12 @@ class _Cli:
                 password = self._secret(args, f"New password for {_text(name)}: ")
                 data = svc.call("POST", f"/users/{name}/password", body={"new_password": password})
             elif action == "recovery-codes":
-                data = svc.call("POST", f"/users/{name}/recovery-codes")
+                data = svc.call(
+                    "POST",
+                    f"/users/{name}/recovery-codes",
+                    body={"current_password": svc.password},
+                    local=True,
+                )
                 self.emit(args, data, self._show_codes)
                 return EXIT_OK
             else:
@@ -1858,6 +1889,12 @@ def _build_parser(env: CliEnv, cli: _Cli) -> _Parser:
 
     p = _add(sub, env, "recover", cli.cmd_recover, "restore every journaled setting (no service)")
     p.add_argument("--dry-run", action="store_true", help="list what would be restored")
+    p.add_argument(
+        "--dead-man",
+        action="store_true",
+        help="as run by the dead-man timer: leave a running service alone and never "
+        "disable enforcement",
+    )
     p = _add(sub, env, "simulate", cli.cmd_simulate, "explore PortLock on a simulated machine")
     p.add_argument("--scenario", choices=sorted(SCENARIOS), default="tour")
     p.add_argument(

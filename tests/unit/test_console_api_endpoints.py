@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_console_support import AUDITOR, OPERATOR, ApiClient, ApiRig, Reply
+from test_console_support import (
+    AUDITOR,
+    AUDITOR_PASSWORD,
+    OPERATOR,
+    OPERATOR_PASSWORD,
+    ApiClient,
+    ApiRig,
+    Reply,
+)
 
 from factories import flash_drive, keyboard
 from integration.harness import ADMIN, ADMIN_PASSWORD, START, StubScanner, with_volume
@@ -1342,14 +1350,22 @@ def test_the_last_administrator_cannot_be_removed_demoted_or_disabled(rig: ApiRi
 
 def test_recovery_codes_are_shown_once_to_the_administrator_or_the_owner(rig: ApiRig) -> None:
     operator, admin, auditor = rig.client("operator"), rig.client("admin"), rig.client("auditor")
-    own = operator.post(f"/users/{OPERATOR}/recovery-codes")
+    own = operator.post(
+        f"/users/{OPERATOR}/recovery-codes", {"current_password": OPERATOR_PASSWORD}
+    )
     assert own.status == 200 and len(own.json["codes"]) == 8 and own.json["username"] == OPERATOR
     assert re.fullmatch(r"[0-9A-Za-z-]+", own.json["codes"][0])
-    assert operator.post(f"/users/{ADMIN}/recovery-codes").json["error"]["details"] == {
-        "permission": "manage_users"
-    }
-    assert auditor.post(f"/users/{AUDITOR}/recovery-codes").status == 200
-    other = admin.post(f"/users/{AUDITOR}/recovery-codes")
+    forbidden = operator.post(
+        f"/users/{ADMIN}/recovery-codes", {"current_password": OPERATOR_PASSWORD}
+    )
+    assert forbidden.json["error"]["details"] == {"permission": "manage_users"}
+    assert (
+        auditor.post(
+            f"/users/{AUDITOR}/recovery-codes", {"current_password": AUDITOR_PASSWORD}
+        ).status
+        == 200
+    )
+    other = admin.post(f"/users/{AUDITOR}/recovery-codes", {"current_password": ADMIN_PASSWORD})
     assert other.status == 200 and other.json["codes"] != own.json["codes"]
     assert rig.runtime.accounts.remaining_recovery_codes(OPERATOR) == 8
     stored = " ".join(

@@ -263,10 +263,13 @@ def create_dir_privacy(
 
 
 def dead_man_command(config: Config, *, python: str | None = None) -> tuple[str, ...]:
-    """The command the dead-man timer runs: ``portlock recover`` for this configuration.
+    """The command the dead-man timer runs: ``portlock recover --dead-man``.
 
     The interpreter is run isolated (``-I``) so that nothing in the working directory
-    or the environment can change what a privileged recovery imports.
+    or the environment can change what a privileged recovery imports. ``--dead-man``
+    tells ``recover`` that a timer, not an operator, started it: it then leaves a running
+    service alone (the service ends its own lockdown) and never writes the kill-switch
+    file, which would otherwise turn enforcement off for good.
     """
     interpreter = python if python is not None else sys.executable
     if not interpreter:
@@ -279,6 +282,7 @@ def dead_man_command(config: Config, *, python: str | None = None) -> tuple[str,
         "recover",
         "--config",
         str(config.paths.config_file),
+        "--dead-man",
     )
 
 

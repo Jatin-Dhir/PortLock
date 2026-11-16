@@ -1022,6 +1022,41 @@ def test_recover_beside_a_service_that_does_not_restore_says_to_stop_it(tmp_path
         service.release()
 
 
+def test_the_dead_man_recover_restores_without_the_kill_switch(tmp_path: Path) -> None:
+    machine = Machine(tmp_path)
+    result = run(tmp_path, "recover", "--dead-man", **machine.factories())
+    assert result.code == EXIT_OK, result.err
+    assert "1 setting(s) restored" in result.out
+    assert not machine.enforcer.is_blocked(machine.device) and open_records(machine.state) == 0
+    # The timer must never switch enforcement off for good: the next start sees the marker,
+    # ends the lockdown it describes as recovered and carries on enforcing.
+    assert not (tmp_path / "config" / "DISABLE_ENFORCEMENT").exists()
+    assert (machine.state / "last-recover.json").is_file()
+    assert "not disabled" in result.out and "delete that file" not in result.out
+
+
+def test_the_dead_man_recover_leaves_a_running_service_alone(tmp_path: Path) -> None:
+    machine = Machine(tmp_path)
+    service = InstanceLock(machine.state / LOCK_FILE_NAME)
+    assert service.acquire()  # the service is running and ends its own lockdown
+    try:
+        result = run(tmp_path, "recover", "--dead-man", **machine.factories())
+        assert result.code == EXIT_OK and "Nothing was changed" in result.out
+        assert not (tmp_path / "config" / "DISABLE_ENFORCEMENT").exists()
+        assert machine.enforcer.is_blocked(machine.device) and open_records(machine.state) == 1
+        assert not (machine.state / "last-recover.json").exists()
+    finally:
+        service.release()
+
+
+def test_an_unprivileged_dead_man_recover_changes_nothing(tmp_path: Path) -> None:
+    machine = Machine(tmp_path, privileged=False)
+    result = run(tmp_path, "recover", "--dead-man", **machine.factories())
+    assert result.code == EXIT_AUTH
+    assert not (tmp_path / "config" / "DISABLE_ENFORCEMENT").exists()
+    assert machine.enforcer.is_blocked(machine.device)
+
+
 def test_the_command_line_holds_no_lock_after_recover(tmp_path: Path) -> None:
     machine = Machine(tmp_path)
     assert run(tmp_path, "recover", **machine.factories()).code == EXIT_OK

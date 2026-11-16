@@ -673,16 +673,43 @@ class _Exchange:
     method: str = ""
     declared: int = 0
     consumed: int = 0
+    head_done: bool = False
+
+
+@dataclass(slots=True, eq=False)
+class _Live:
+    """One accepted connection, as the listener tracks it.
+
+    ``evicted`` is set when the connection was cut to make room for a newer one: its slot
+    then belongs to that newer connection and the evicted one must not release it.
+    """
+
+    sock: socket.socket
+    exchange: _Exchange | None = None
+    evicted: bool = False
+
+    @property
+    def awaiting_head(self) -> bool:
+        """True while no complete request line and headers have arrived."""
+        return self.exchange is None or not self.exchange.head_done
 
 
 class _Server:
-    """The listener: one accept thread, one thread per connection, bounded."""
+    """The listener: one accept thread, one thread per connection, bounded.
+
+    When every slot is taken, the connection that has waited longest for its request
+    head is cut and its slot goes to the newcomer. A local process that opens many
+    connections and sends nothing can therefore not shut the command line and the
+    console out: a client that sends its request at once always outlives such idlers.
+    """
 
     def __init__(self, api: ApiServer, family: int) -> None:
         self.api = api
         self.socket = socket.socket(family, socket.SOCK_STREAM)
         self._counter = 0
         self._stopped = False
+        self._live_lock = threading.Lock()
+        self._live: list[_Live] = []
 
     def bind(self, address: tuple[str, int]) -> None:
         # Refuse address reuse (DESIGN 14.20), so no other process can share the port.
@@ -710,25 +737,53 @@ class _Server:
             self._admit(client)
 
     def _admit(self, client: socket.socket) -> None:
-        if not self.api._acquire_slot():
+        live = _Live(client)
+        if self.api._acquire_slot():
+            with self._live_lock:
+                self._live.append(live)
+        elif not self._evict_one_idler(live):
             self.api._reject_busy(client)
             return
         self._counter += 1
         thread = threading.Thread(
             target=self._run,
-            args=(client,),
+            args=(live,),
             name=f"portlock-api-{self._counter}",
             daemon=True,
         )
         try:
             thread.start()
         except RuntimeError:
+            self._forget(live)
             self.api._release_slot()
             self.api._reject_busy(client)
 
-    def _run(self, client: socket.socket) -> None:
+    def _evict_one_idler(self, newcomer: _Live) -> bool:
+        """Cut the connection that has waited longest for its head; ``newcomer`` takes its slot."""
+        with self._live_lock:
+            for live in self._live:
+                if live.awaiting_head and not live.evicted:
+                    live.evicted = True
+                    self._live.append(newcomer)
+                    victim = live
+                    break
+            else:
+                return False
+        with contextlib.suppress(OSError):
+            victim.sock.shutdown(socket.SHUT_RDWR)
+        return True
+
+    def _forget(self, live: _Live) -> bool:
+        """Stop tracking ``live``; True if it still owns its slot."""
+        with self._live_lock:
+            if live in self._live:
+                self._live.remove(live)
+            return not live.evicted
+
+    def _run(self, live: _Live) -> None:
+        client = live.sock
         try:
-            self.api._serve(client)
+            self.api._serve(client, live)
         except Exception as exc:
             _LOG.error("an API connection failed unexpectedly", exc_info=exc)
         finally:
@@ -736,7 +791,8 @@ class _Server:
                 client.shutdown(socket.SHUT_WR)
             with contextlib.suppress(OSError):
                 client.close()
-            self.api._release_slot()
+            if self._forget(live):
+                self.api._release_slot()
 
     def close(self) -> None:
         self._stopped = True
@@ -913,8 +969,10 @@ class ApiServer:
 
     # --- one connection --------------------------------------------------------------
 
-    def _serve(self, sock: socket.socket) -> None:
+    def _serve(self, sock: socket.socket, live: _Live | None = None) -> None:
         exchange = _Exchange(sock, secrets.token_hex(8), time.monotonic() + self.request_timeout)
+        if live is not None:
+            live.exchange = exchange
         conn = _Conn(sock, self.write_timeout)
         try:
             response = self._process(exchange)
@@ -991,6 +1049,7 @@ class ApiServer:
 
     def _process(self, exchange: _Exchange) -> Response:
         head, prefix = self._read_head(exchange)
+        exchange.head_done = True
         method, target, headers = _parse_head(head)
         exchange.method = method
         self._check_host(headers)
@@ -1588,11 +1647,17 @@ class _Endpoints:
     def _page(self, items: Sequence[Any], limit: int, cursor: Callable[[Any], Any]) -> Any:
         return cursor(items[-1]) if items and len(items) >= limit else None
 
-    def _credential_channel(self, request: Request) -> Channel:
-        """Which channel a credential check runs on; counts it against the global budget."""
+    def _is_local(self, request: Request) -> bool:
+        """True if the request carries the command-line secret from the private runtime file."""
         secret = request.headers.get(CLI_SECRET_HEADER.lower())
         if secret is not None and self.rt.verify_cli_secret(secret):
             request.cli = True
+            return True
+        return False
+
+    def _credential_channel(self, request: Request) -> Channel:
+        """Which channel a credential check runs on; counts it against the global budget."""
+        if self._is_local(request):
             return Channel.LOCAL
         wait = self.server.charge_login()
         if wait:
@@ -2310,7 +2375,12 @@ class _Endpoints:
         if (password is None) == (code is None):
             fields.problem("password", "give exactly one of password and recovery_code")
         fields.finish()
-        wait = self.accounts.lockout_remaining(request.user)
+        # DESIGN 14.21: the network lockout never blocks the elevated local command line,
+        # so whoever can reach the service's port cannot keep the administrator from
+        # lifting a lockdown by failing logins for the administrator's name.
+        local = self._is_local(request)
+        channel = Channel.LOCAL if local else Channel.NETWORK
+        wait = self.accounts.lockout_remaining(request.user, channel=channel)
         if password is not None and wait:
             raise ApiError(
                 429,
@@ -2319,7 +2389,7 @@ class _Endpoints:
                 details={"retry_after_seconds": wait},
             )
         credential = (
-            Credential("password", password)
+            Credential("password", password, local=local)
             if password is not None
             else Credential("recovery_code", code or "")
         )
@@ -2341,7 +2411,13 @@ class _Endpoints:
     def refine_change(self, request: Request) -> Sequence[Permission]:
         for change in self.svc.pending_changes():
             if change.id == request.params["change_id"]:
-                return (_CHANGE_PERMISSION.get(change.kind, Permission.CHANGE_MODE),)
+                needed = _CHANGE_PERMISSION.get(change.kind, Permission.CHANGE_MODE)
+                if change.kind == CHANGE_LOCKDOWN and request.path.endswith("/cancel"):
+                    # Cancelling a lockdown that is waiting for confirmation lifts it.
+                    # Lifting needs LIFT_LOCKDOWN (and the password); the right to engage
+                    # is not enough to take another administrator's lockdown away.
+                    return (needed, Permission.LIFT_LOCKDOWN)
+                return (needed,)
         raise ApiError(404, "no_pending_change", "there is no such change waiting for confirmation")
 
     def change_confirm(self, request: Request) -> Response:
@@ -2505,7 +2581,20 @@ class _Endpoints:
         return () if own else (Permission.MANAGE_USERS,)
 
     def users_recovery_codes(self, request: Request) -> Response:
-        request.fields().finish()
+        fields = request.fields()
+        current = fields.string("current_password", required=True, min_length=1, max_length=4096)
+        fields.finish()
+        # A recovery code can lift a lockdown and reset a password, and issuing a set
+        # voids the operator's offline codes. A bearer token alone must not be able to do
+        # that: the caller proves their own current password first.
+        channel = self._credential_channel(request)
+        result = self.accounts.verify_password(request.user, current or "", channel=channel)
+        if not result.ok or result.user is None:
+            raise self._auth_failure(
+                result.reason or AuthFailure.INVALID_CREDENTIALS,
+                result.retry_after_seconds,
+                reauth=True,
+            )
         name = request.params["username"]
         codes = self.accounts.generate_recovery_codes(name, actor=request.user)
         return Response(

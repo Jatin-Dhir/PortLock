@@ -308,12 +308,12 @@ class AuditWriter:
         self._rejected = 0
         self._newest: datetime | None = None
         try:
-            tail = log.tail(1)
+            # The highest timestamp, not the last record's: after a clock rollback the
+            # records written since carry earlier times, and a restart must not forget
+            # the later one (DESIGN 14.12).
+            self._newest = log.newest_timestamp()
         except (StoreError, AuditError) as exc:
-            _LOG.error("the newest audit record could not be read: %s", exc)
-            tail = []
-        if tail:
-            self._newest = tail[-1].timestamp
+            _LOG.error("the newest audit timestamp could not be read: %s", exc)
 
     @property
     def log(self) -> AuditLog:
@@ -387,22 +387,26 @@ class AuditWriter:
                 with self._lock:
                     if not self._backlog:
                         break
-                    pending = self._backlog.popleft()
+                    # Left in the backlog while it is written: a caller that finds the
+                    # backlog empty may write at once, and must not overtake an older event
+                    # that is still on its way into the log.
+                    pending = self._backlog[0]
                 try:
                     record = self._append(pending, delayed=True)
                 except (StoreError, OSError) as exc:
                     _LOG.warning("the audit backlog could not be flushed yet: %s", exc)
-                    self._requeue(pending)
                     break
                 except AuditError as exc:
                     if exc.code in _BACKLOGGED_AUDIT_CODES:
                         _LOG.warning("the audit backlog could not be flushed yet: %s", exc)
-                        self._requeue(pending)
                         break
                     _LOG.error("a backlogged audit event was refused and dropped: %s", exc)
                     with self._lock:
                         self._rejected += 1
+                        self._discard_locked(pending)
                     continue
+                with self._lock:
+                    self._discard_locked(pending)
                 written += 1
                 self._after_write(record)
         return written
@@ -431,12 +435,10 @@ class AuditWriter:
         self._after_write(record)
         return record
 
-    def _requeue(self, pending: _PendingAudit) -> None:
-        with self._lock:
-            self._backlog.appendleft(pending)
-            while len(self._backlog) > self._max:
-                self._backlog.pop()
-                self._dropped += 1
+    def _discard_locked(self, pending: _PendingAudit) -> None:
+        """Remove ``pending`` from the front of the backlog (it may have been pushed out)."""
+        if self._backlog and self._backlog[0] is pending:
+            self._backlog.popleft()
 
     def _append(self, pending: _PendingAudit, *, delayed: bool) -> AuditRecord:
         data = dict(pending.data)
@@ -910,6 +912,10 @@ class _Conn:
     scanned: set[str] = field(default_factory=set)
     clone: bool = False
     held: bool = False
+    # True from arrival until PortLock has admitted the device: it arrived while an
+    # operating-system default-deny was in force, so it is unauthorized and nothing
+    # else (no journal record of its own) says who must authorize it.
+    arrived_under_deny: bool = False
     used_grants: set[str] = field(default_factory=set)
     audited: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
@@ -1100,6 +1106,10 @@ class PortLockService:
 
         self._lock = threading.RLock()
         self._conns: dict[str, _Conn] = {}
+        # Connections the previous run left open: instance id -> (backend token, plugged in
+        # at). Read at start, before they are closed, so a device still connected keeps the
+        # time it really arrived (a lockdown exempts what was there before it began).
+        self._previous_connected: dict[str, tuple[str | None, datetime]] = {}
         self._context = SafetyContext(
             scope=config.scope, hid_enforcement_enabled=config.hid_enforcement_enabled
         )
@@ -1238,6 +1248,10 @@ class PortLockService:
                     "killswitch": killswitch_at_start,
                 },
             )
+            self._previous_connected = {
+                record.instance_id: (record.connection_token, record.connected_at)
+                for record in self._safe(self._store.open_connections, [])
+            }
             closed = self._safe(
                 lambda: self._store.close_open_connections(
                     removed_at=now, reason="service_restart"
@@ -1377,6 +1391,7 @@ class PortLockService:
                     self._live,
                     [conn.device for conn in self._conns.values()],
                     reason="service_stop",
+                    readmit=self._held_back_ids(),
                 )
                 self._baseline_active = False
                 if report.restored + report.released + report.readmitted > 0 or report.failed:
@@ -2061,6 +2076,16 @@ class PortLockService:
             current = self._scope()
             if scope == current:
                 return Applied(current)
+            # A widening still waiting for confirmation would, at its deadline, write back
+            # the scope from before it: possibly wider than this request. Cancel it (that
+            # restores the previous scope) and decide from where that leaves things.
+            waiting = [c for c in self._confirmations.pending() if c.kind == CHANGE_WIDEN_SCOPE]
+            for change in waiting:
+                self._confirmations.cancel(change.id, actor=actor, reason="scope changed")
+            if waiting:
+                current = self._scope()
+                if scope == current:
+                    return Applied(current)
             if _SCOPE_ORDER[scope] > _SCOPE_ORDER[current]:
                 change = self._confirmations.propose(
                     CHANGE_WIDEN_SCOPE,
@@ -2639,6 +2664,14 @@ class PortLockService:
             self._on_removed(existing.device, reason="resync", synthesized=True)
         fp = compute_fingerprint(device)
         now = self._clock.now()
+        connected_at = now
+        if present_at_start:
+            token, since = self._previous_connected.pop(device.instance_id, (None, now))
+            # The same connection as the previous run's (the backend's token still matches),
+            # so it has been here since `since`, not since this start. Without a token
+            # nothing proves it is the same device: it counts as new.
+            if token is not None and token == device.connection_id and since <= now:
+                connected_at = since
         if not present_at_start:
             try:
                 self._journal.discard_volatile(device.instance_id, reason="new connection")
@@ -2651,16 +2684,17 @@ class PortLockService:
             id=None,
             run_id=self.run_id,
             present_at_start=present_at_start,
-            connected_at=now,
+            connected_at=connected_at,
             storage_id=storage_identity(device),
         )
+        conn.arrived_under_deny = not present_at_start and self._default_deny_on()
         try:
             record = self._store.open_connection(
                 device,
                 fp,
                 run_id=self.run_id,
                 present_at_start=present_at_start,
-                connected_at=now,
+                connected_at=connected_at,
                 storage_identity=conn.storage_id,
             )
             conn.id = record.id
@@ -3195,6 +3229,20 @@ class PortLockService:
     def _default_deny_on(self) -> bool:
         return self._journal.has_open(scope=GLOBAL_SCOPE, actions={Action.DEFAULT_DENY_ON})
 
+    def _held_back_ids(self) -> frozenset[str]:
+        """Instance ids of the connected devices that arrived under default-deny and wait."""
+        return frozenset(c.instance_id for c in self._conns.values() if c.arrived_under_deny)
+
+    def _holds_back(self, conn: _Conn) -> bool:
+        """True if PortLock itself keeps this device unauthorized, so only it can admit it.
+
+        That is the case when PortLock blocked the device, or when it arrived under
+        default-deny and was not admitted yet. A device that someone else disabled (the
+        user in Device Manager, an administrator, USBGuard) is none of PortLock's
+        business: admitting it would undo their decision and leave no record.
+        """
+        return self._blocked_by_us(conn.instance_id) or conn.arrived_under_deny
+
     def _call(
         self,
         scope: str,
@@ -3276,7 +3324,7 @@ class PortLockService:
         iid = conn.instance_id
         if self._journal.has_open(scope=iid, actions={Action.READ_ONLY}):
             self._release_read_only(conn, cause)
-        if self._blocked_by_us(iid) or self._default_deny_on():
+        if self._holds_back(conn):
             self._admit(conn, cause)
 
     def _apply_blocked(
@@ -3376,7 +3424,7 @@ class PortLockService:
             iid, Action.READ_ONLY, fpv, lambda: self._live.set_read_only(device, True)
         )
         self._record_result(conn, Action.READ_ONLY, result, cause=cause)
-        if self._blocked_by_us(iid) or self._default_deny_on():
+        if self._holds_back(conn):
             if not result.ok and self._config.fail_closed:
                 return _result_enforcement(
                     Outcome.FAILED,
@@ -3413,7 +3461,7 @@ class PortLockService:
             return dataclasses.replace(
                 blocked, detail="read-only unavailable; blocked because fail_closed is set"
             )
-        if self._blocked_by_us(conn.instance_id) or self._default_deny_on():
+        if self._holds_back(conn):
             self._admit(conn, cause)
         if result is None:
             result = EnforcementResult(
@@ -3450,7 +3498,7 @@ class PortLockService:
             self._record_result(conn, Action.READ_WRITE, freed, cause=cause)
             if freed.changed or not freed.ok:
                 last = freed
-        if self._blocked_by_us(iid) or self._default_deny_on():
+        if self._holds_back(conn):
             admitted = self._admit(conn, cause)
             if admitted.changed or not admitted.ok:
                 last = admitted
@@ -3478,6 +3526,7 @@ class PortLockService:
         self._record_result(conn, Action.UNBLOCK, result, cause=cause)
         if not result.ok:
             return result
+        conn.arrived_under_deny = False
         if result.changed:
             self._released += 1
         try:
@@ -3775,7 +3824,11 @@ class PortLockService:
         except StoreError as exc:
             self._mark_degraded("store", str(exc))
         targets = list(devices) if devices is not None else [c.device for c in self._conns.values()]
-        report = rollback(self._journal, self._live, targets, reason="killswitch")
+        # Devices handed in at start were enumerated before any connection existed: nothing
+        # says which of them default-deny held back, so all are readmitted. Once the
+        # service watches devices, only those it knows it held back are.
+        readmit = self._held_back_ids() if devices is None else None
+        report = rollback(self._journal, self._live, targets, reason="killswitch", readmit=readmit)
         self._baseline_active = False
         self._audit(
             ev.KILLSWITCH_ACTIVATED,
@@ -3950,7 +4003,10 @@ class PortLockService:
                 self._alert("warning", "the scan queue is full", mount, conn=conn)
         before = conn.scan_state
         self._update_scan_state(conn)
-        if conn.scan_state is not before and conn.scan_state is ScanState.ERROR:
+        if conn.scan_state is not before:
+            # The decision was converged on the scan state before these volumes were
+            # queued. A volume that is not yet scanned makes a `required` scan stop being
+            # clean, and the device must not stay writable until the scan finishes.
             self._reevaluate(conn, "scan")
 
     def _queue_scan(
@@ -3979,7 +4035,8 @@ class PortLockService:
             return None
         conn.scanned.add(mount)
         conn.pending_scans.add(mount)
-        conn.verdicts.pop(mount, None)
+        # The previous verdict of this mount stays until the new scan replaces it: a
+        # rescan must not hand back write access that the last scan took away.
         if scan_id is not None:
             conn.last_scan_id = scan_id
         return job

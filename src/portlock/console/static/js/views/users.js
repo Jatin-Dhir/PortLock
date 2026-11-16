@@ -1,7 +1,7 @@
 // Users and recovery codes. Administrators only. Any change to an account's password, role
 // or enabled state ends every session of that account.
 
-import { showRecoveryCodes } from "../account.js";
+import { issueRecoveryCodes } from "../account.js";
 import { api, seg } from "../api.js";
 import { h, replace } from "../dom.js";
 import { timeEl } from "../fmt.js";
@@ -92,13 +92,7 @@ export function mount(root) {
         small: true,
         tone: "quiet",
         onClick: async () => {
-          const ok = await confirmDialog({
-            title: `New recovery codes for ${user.username}?`,
-            message: "Their current codes stop working. The new ones are shown once, here.",
-            confirmLabel: "Issue new codes",
-          });
-          if (!ok) return;
-          showRecoveryCodes(await api.post(`/users/${name}/recovery-codes`));
+          await issueRecoveryCodes(user.username, "Their current codes stop working. The new ones are shown once, here.");
           await load();
         },
       }),

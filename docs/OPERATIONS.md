@@ -155,7 +155,8 @@ never keeps the initial key.
   MAC check.
 - **Recovery codes.** Each lifts a lockdown or logs in once, in place of the password. Store
   them offline too. Issue a fresh set with `portlock user recovery-codes NAME` (it replaces
-  the old set). A lost password is reset locally with `portlock user reset-password NAME
+  the old set, and it uses the password you signed in with: a session alone cannot mint
+  codes). A lost password is reset locally with `portlock user reset-password NAME
   --local`, which needs rights on the state directory, not a PortLock login.
 - If you add `audit.hmac_key_file` to an existing installation, the next `portlock run`
   creates the key store and prints the key only if it is started from a terminal. Under a
@@ -271,8 +272,12 @@ accepted if `lockdown.allow_new_input_devices` is true (the default).
   stored and counted on the monotonic clock, so a restart resumes the remainder, and an
   expired lockdown found at start is lifted and not re-applied. Separately, an
   operating-system timer (`portlock-lockdown`, a systemd transient timer on Linux, the task
-  `\PortLock\portlock-lockdown` on Windows) runs `portlock recover` at expiry, so the
-  lockdown ends even if the service has died. A timer's `recover` also creates the
+  `\PortLock\portlock-lockdown` on Windows) runs `portlock recover --dead-man` 30 seconds after
+  expiry, so the lockdown ends even if the service has died; a living service lifts it
+  first, within a second of the expiry, and cancels the timer. The timer's `recover` finds
+  a running service and then does nothing at all, and otherwise restores the journal
+  **without** creating the kill-switch file: the next start sees that the lockdown was
+  recovered and enforces as before. Only an operator's own `portlock recover` creates the
   kill-switch file (below).
 - **Lifting** needs the administrator password or a recovery code. An operator can engage a
   lockdown but not lift one.
@@ -302,7 +307,8 @@ touch /etc/portlock/DISABLE_ENFORCEMENT          # Linux
 or any PortLock password. It needs only the journal file and **operating-system
 administrator rights**. It leaves an audit marker that the next start records, and it
 **creates the kill-switch file first**, so enforcement stays off until you delete that file
-and restart the service.
+and restart the service. (The dead-man timer runs `portlock recover --dead-man`, which
+never creates it; see section 6.)
 
 ```
 portlock recover --dry-run             # list what would be restored; changes nothing
@@ -310,9 +316,9 @@ portlock recover                       # restore it (administrator or root)
 ```
 
 Run under WSL: `--dry-run` printed `0 open journal record(s) in .../journal.jsonl; nothing
-was changed.` Without root, `recover` creates the kill-switch file and then refuses with
-`portlock recover needs operating-system administrator rights` (exit 3), so a failed
-attempt still leaves the kill switch set. If the service is running, `recover` creates the
+was changed.` Without root, `recover` refuses with
+`portlock recover needs operating-system administrator rights` (exit 3) before it writes
+anything, so a failed attempt leaves no kill switch behind. If the service is running, `recover` creates the
 file and waits up to 10 seconds for the service to empty the journal; if it does not,
 stop the PortLock process and run `recover` again.
 

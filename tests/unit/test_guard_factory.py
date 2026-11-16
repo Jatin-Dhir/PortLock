@@ -167,6 +167,7 @@ def test_the_dead_man_command_runs_recover_isolated(config: Config) -> None:
         "recover",
         "--config",
         str(config.paths.config_file),
+        "--dead-man",
     )
     assert DEAD_MAN_TIMER == "deadman"
     with pytest.raises(BackendError):

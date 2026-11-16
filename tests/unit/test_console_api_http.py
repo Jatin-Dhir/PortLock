@@ -491,9 +491,25 @@ def test_a_client_that_stops_sending_is_disconnected(rig: ApiRig) -> None:
 def test_a_busy_server_answers_503_without_reading_and_recovers(rig: ApiRig) -> None:
     server = ApiServer(rig.runtime, host="127.0.0.1", port=0, max_in_flight=2, request_timeout=30.0)
     server.start()
+    # Two requests in flight: complete heads that promise a body which never arrives. (A
+    # connection that sends nothing is cut to make room instead: see test_review_api.py.)
     held = [socket.create_connection(("127.0.0.1", server.port)) for _ in range(2)]
+    for sock in held:
+        sock.sendall(
+            head(
+                rig,
+                "POST /api/v1/auth/login HTTP/1.1",
+                "Content-Type: application/json",
+                "Content-Length: 50",
+            ).replace(f"127.0.0.1:{rig.port}".encode(), f"127.0.0.1:{server.port}".encode())
+        )
     try:
         deadline = time.monotonic() + WAIT
+        live = server._server._live  # type: ignore[union-attr]
+        while time.monotonic() < deadline and (
+            len(live) < 2 or any(item.awaiting_head for item in live)
+        ):
+            time.sleep(0.01)
         reply = None
         while time.monotonic() < deadline:
             raw = raw_exchange(server.port, head(rig, "GET /api/v1/ping HTTP/1.1"))

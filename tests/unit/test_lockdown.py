@@ -72,6 +72,9 @@ PASSWORD = Credential("password", "correct horse battery staple")
 RECOVERY_CODE = "ABCD-EFGH-JKLM-NPQR"
 CHANNEL = "session-1"
 RECOVER_ARGV = ("portlock", "recover")
+# The operating-system timer fires this long after the lockdown expires, so that the
+# service, which lifts on its own tick, always gets there first.
+TIMER_GRACE = timedelta(seconds=30)
 RESTRICTING = (Action.BLOCK, Action.READ_ONLY, Action.EJECT, Action.DEFAULT_DENY_ON)
 
 
@@ -370,10 +373,10 @@ def test_engage_lists_applies_and_waits_for_confirmation(
     assert status.confirm_remaining_seconds == 60 and status.external_timer_armed
     assert result.summary.blocked == 2 and result.change.status == "awaiting"
     assert machine.blocked() == BLOCKED and machine.fake.default_deny
-    # The out-of-process safeties: the lockdown timer at expiry, and the rollback timer
-    # shortly after the confirmation deadline.
+    # The out-of-process safeties: the lockdown timer shortly after expiry, and the rollback
+    # timer shortly after the confirmation deadline.
     assert machine.timer.armed == {
-        LOCKDOWN_TIMER: start + timedelta(minutes=10),
+        LOCKDOWN_TIMER: start + timedelta(minutes=10) + TIMER_GRACE,
         CONFIRM_TIMER_PREFIX + result.change.id: start + timedelta(seconds=90),
     }
     assert set(machine.timer.commands.values()) == {RECOVER_ARGV}
@@ -383,7 +386,7 @@ def test_engage_lists_applies_and_waits_for_confirmation(
 
     status = machine.manager.confirm(result.change.id, actor="alice", channel=CHANNEL)
     assert status.pending_change_id is None and status.active
-    assert machine.timer.armed == {LOCKDOWN_TIMER: start + timedelta(minutes=10)}
+    assert machine.timer.armed == {LOCKDOWN_TIMER: start + timedelta(minutes=10) + TIMER_GRACE}
     assert machine.events()[-1] == "change.confirmed"
     assert machine.restricted_ids() & PROTECTED == set()
 
@@ -490,7 +493,7 @@ def test_renew_restarts_the_dead_man_timer(machine: Machine, clock: FakeClock) -
     assert status.renew_count == 1 and status.remaining_seconds == 1800
     assert status.expires_at == clock.now() + timedelta(minutes=30)
     assert machine.timer.log == [("cancel", LOCKDOWN_TIMER), ("arm", LOCKDOWN_TIMER)]
-    assert machine.timer.armed[LOCKDOWN_TIMER] == clock.now() + timedelta(minutes=30)
+    assert machine.timer.armed[LOCKDOWN_TIMER] == clock.now() + timedelta(minutes=30) + TIMER_GRACE
     assert machine.data("lockdown.renewed")["renew_count"] == 1
     with pytest.raises(LockdownError):
         machine.manager.renew(actor="alice", minutes=121)
@@ -514,8 +517,8 @@ def test_a_renewal_whose_timer_fails_keeps_the_lockdown_and_retries(
     clock.advance(1)
     machine.manager.tick()
     assert machine.manager.status().external_timer_armed
-    assert machine.timer.armed[LOCKDOWN_TIMER] == clock.now() + timedelta(minutes=20) - timedelta(
-        seconds=1
+    assert machine.timer.armed[LOCKDOWN_TIMER] == (
+        clock.now() + timedelta(minutes=20) - timedelta(seconds=1) + TIMER_GRACE
     )
 
 
@@ -593,7 +596,7 @@ def test_expiry_while_running_follows_the_monotonic_clock(
     if jump:
         # The wall clock moved: the operating-system timer follows the true expiry.
         expected = clock.now() + timedelta(minutes=8)
-        assert machine.timer.armed[LOCKDOWN_TIMER] == expected
+        assert machine.timer.armed[LOCKDOWN_TIMER] == expected + TIMER_GRACE
         assert machine.manager.status().expires_at == expected
     clock.advance(timedelta(minutes=8) - timedelta(seconds=1))
     machine.manager.tick()
@@ -626,7 +629,7 @@ def test_a_restart_resumes_the_remainder(machine: Machine, clock: FakeClock) -> 
     status = machine.manager.status()
     assert status.active and status.remaining_seconds == 330
     assert machine.blocked() == BLOCKED
-    assert machine.timer.armed[LOCKDOWN_TIMER] == clock.now() + timedelta(seconds=330)
+    assert machine.timer.armed[LOCKDOWN_TIMER] == clock.now() + timedelta(seconds=330) + TIMER_GRACE
     # A device plugged in after the restart is held too.
     machine.plug(flash_drive(instance_id="test/2-1", serial="TEST0021NEW1", bus_path="2-1"))
     machine.reconcile("arrival")
@@ -805,7 +808,9 @@ def test_a_confirmed_lockdown_survives_a_crash(machine: Machine, clock: FakeCloc
     assert machine.crash_and_restart() == "resumed"
     assert machine.manager.active and machine.blocked() == BLOCKED and machine.fake.default_deny
     assert machine.store.pending_changes() == []
-    assert machine.timer.armed == {LOCKDOWN_TIMER: clock.now() + timedelta(seconds=595)}
+    assert machine.timer.armed == {
+        LOCKDOWN_TIMER: clock.now() + timedelta(seconds=595) + TIMER_GRACE
+    }
 
 
 LIFT_CRASHES: dict[str, Callable[[Machine, pytest.MonkeyPatch], None]] = {
@@ -1026,12 +1031,13 @@ def test_rollback_restores_newest_first_and_never_restricts(
         "test/a/authorized",
         "authorized_default",
     ]
-    assert report.restored == 3 and report.released == 2 and report.readmitted == 1
+    assert report.restored == 3 and report.released == 2 and report.readmitted == 2
     assert len(report.failed) == 1 and "device busy" in report.failed[0][1]
     assert report.remaining == 1  # the read-only entry that failed stays open
     assert [r.entry.target for r in journal.open_records() if r.entry] == ["test/a/ro"]
     assert not fake.is_blocked(a) and not fake.is_blocked(b) and not fake.is_blocked(held)
-    assert not fake.is_blocked(stray) and fake.is_blocked(a_hub)  # hubs are not re-admitted
+    # Hubs are readmitted too: nothing behind an unauthorized dock can enumerate.
+    assert not fake.is_blocked(stray) and not fake.is_blocked(a_hub)
     assert not fake.default_deny
     assert fake.calls_for(*RESTRICTING) == ()
     assert report.to_dict()["failed"][0][1].startswith("device busy")

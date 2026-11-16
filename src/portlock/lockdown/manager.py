@@ -115,9 +115,12 @@ _SYSTEM = "system"
 _LOCAL_CONSOLE = "local-console"
 _MAX_REASON = 256
 _MAX_PREVIEW_IN_AUDIT = 50
-# How long after the confirmation deadline the out-of-process timer fires: the service
-# rolls back first when it is alive, and the timer is only the backstop.
+# How long after the deadline (a confirmation's, or a lockdown's expiry) the
+# out-of-process timer fires: the service ends it first when it is alive, on a tick that
+# runs about once a second, and the timer is only the backstop for a service that died.
+# Armed for the exact instant, it would race the service's own lift.
 _CONFIRM_TIMER_GRACE_SECONDS = 30
+_LOCKDOWN_TIMER_GRACE_SECONDS = 30
 # A wall clock that drifts this far from the monotonic clock was changed; the timer that
 # fires by wall-clock time is then re-armed.
 _CLOCK_TOLERANCE_SECONDS = 60
@@ -200,10 +203,16 @@ class ReconcileSummary:
 
 @dataclass(frozen=True, slots=True)
 class Credential:
-    """A password or a recovery code offered to lift a lockdown. Never printed."""
+    """A password or a recovery code offered to lift a lockdown. Never printed.
+
+    ``local`` is True when it came over the elevated local command line (the request
+    carried the secret from the private runtime file). Such a password is checked on the
+    local channel, which the network lockout never refuses (DESIGN 14.21).
+    """
 
     kind: Literal["password", "recovery_code"]
     secret: str = field(repr=False)
+    local: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1212,7 +1221,7 @@ class LockdownManager:
         self._start_countdown(seconds)
         # The out-of-process safety exists before anything is restricted. If it cannot
         # be armed, the engage fails and commit-confirm rolls it back.
-        self._timer.arm(LOCKDOWN_TIMER, expires, self._argv)
+        self._timer.arm(LOCKDOWN_TIMER, _timer_time(expires), self._argv)
         self._timer_ok = True
         summary = self._call_reconcile("lockdown.engaged")
         self._store.save_lockdown(
@@ -1407,7 +1416,7 @@ class LockdownManager:
         """Cancel and arm the lockdown timer. Returns ``armed`` or why it failed."""
         try:
             self._timer.cancel(LOCKDOWN_TIMER)
-            self._timer.arm(LOCKDOWN_TIMER, expires, self._argv)
+            self._timer.arm(LOCKDOWN_TIMER, _timer_time(expires), self._argv)
         except Exception as exc:
             # The lockdown stays in force and the in-process countdown still ends it;
             # tick() retries arming until it succeeds.
@@ -1527,6 +1536,7 @@ def rollback(
     devices: Sequence[UsbDevice],
     *,
     reason: str,
+    readmit: Collection[str] | None = None,
 ) -> RollbackReport:
     """Put every journaled setting back, newest first. Never raises.
 
@@ -1534,9 +1544,14 @@ def rollback(
        it is closed, otherwise it stays open and is reported.
     2. Every hold is released by unblocking its device if present, and closed (an
        absent device's hold went with it).
-    3. If default-deny was journaled, every present device that is not a hub is
-       unblocked: a device that arrived under default-deny while nothing was watching
-       has no record of its own.
+    3. If default-deny was journaled, the present devices are unblocked, hubs first
+       (nothing behind an unauthorized hub can enumerate, so a dock is admitted before
+       the keyboard plugged into it): a device that arrived under default-deny while
+       nothing was watching has no record of its own. ``readmit`` limits this to the
+       instance ids it names; a caller that knows which devices default-deny held back
+       passes them, so that a device someone else disabled stays as they left it.
+       ``None`` (``portlock recover`` without a service, which knows nothing about
+       any device) admits every present device.
 
     It never calls a restricting method. ``enforcer`` must be the live
     ``SafeEnforcer``; its ``restore`` validates every entry before writing. Every call is
@@ -1596,9 +1611,9 @@ def rollback(
         except Exception as exc:
             failed.append((record.id, f"{type(exc).__name__}: {exc}"))
     if default_deny:
-        for device in devices:
-            if device.is_hub:
-                continue
+        wanted = None if readmit is None else frozenset(readmit)
+        candidates = [d for d in devices if wanted is None or d.instance_id in wanted]
+        for device in sorted(candidates, key=lambda item: not item.is_hub):
             try:
                 result = releasing(
                     device.instance_id, Action.UNBLOCK, functools.partial(enforcer.unblock, device)
@@ -1716,6 +1731,11 @@ def consume_recover_marker(state_dir: str | os.PathLike[str]) -> dict[str, Any] 
 
 
 # --- small helpers -----------------------------------------------------------------------
+
+
+def _timer_time(expires: datetime) -> datetime:
+    """When the operating-system timer fires for a lockdown that ends at ``expires``."""
+    return expires + timedelta(seconds=_LOCKDOWN_TIMER_GRACE_SECONDS)
 
 
 def _iso(value: datetime | None) -> str | None:

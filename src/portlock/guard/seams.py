@@ -1393,6 +1393,12 @@ _ICACLS_GRANT = ("*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F")
 # Everyone, Authenticated Users, Users, CREATOR OWNER: removed explicitly as well, in
 # case the directory was created with explicit entries for them.
 _ICACLS_REMOVE = ("*S-1-1-0", "*S-1-5-11", "*S-1-5-32-545", "*S-1-3-0")
+# The Administrators group owns the directory and everything in it. An owner keeps the
+# implicit right to rewrite the access list, so a directory a standard user created
+# before PortLock was installed would stay theirs to open up again, whatever the entries
+# say. ``/T`` reaches what that user already put inside it, ``/C`` keeps going past a
+# file that cannot be changed (the exit status still says so).
+_ICACLS_OWNER = "*S-1-5-32-544"
 _ICACLS_TIMEOUT = 8.0
 
 
@@ -1431,10 +1437,14 @@ def parse_icacls_output(output: str, path: str) -> tuple[list[tuple[str, str]], 
 class IcaclsDirPrivacy:
     """:class:`DirPrivacy` on Windows with ``icacls``.
 
-    Private means: inheritance removed and access granted only to LocalSystem and the
-    Administrators group (deny entries are allowed). The check reads the names
-    ``icacls`` prints, which Windows translates; on a non-English system they are not
-    recognised and the directory is reported as not private (fail closed).
+    Private means: owned by the Administrators group, inheritance removed and access
+    granted only to LocalSystem and the Administrators group (deny entries are allowed).
+    ``ensure_private`` sets all three, including on what is already inside the
+    directory. The check reads the names ``icacls`` prints, which Windows translates; on a
+    non-English system they are not recognised and the directory is reported as not
+    private (fail closed). ``icacls`` does not print the owner, so :meth:`check` cannot
+    see it: the guarantee about ownership is that :meth:`ensure_private` runs at every
+    start, before anything is trusted.
     """
 
     def __init__(
@@ -1454,6 +1464,15 @@ class IcaclsDirPrivacy:
             self._makedirs(text)
         else:
             os.makedirs(text, exist_ok=True)
+        owner = self._runner.run(
+            [self._icacls, text, "/setowner", _ICACLS_OWNER, "/T", "/C"],
+            timeout=_ICACLS_TIMEOUT,
+        )
+        if not owner.ok:
+            raise EnforcementError(
+                f"icacls could not take ownership of {text}: {owner.describe()}",
+                code="not_private",
+            )
         result = self._runner.run(
             [
                 self._icacls,
@@ -1463,6 +1482,8 @@ class IcaclsDirPrivacy:
                 *_ICACLS_GRANT,
                 "/remove:g",
                 *_ICACLS_REMOVE,
+                "/T",
+                "/C",
             ],
             timeout=_ICACLS_TIMEOUT,
         )

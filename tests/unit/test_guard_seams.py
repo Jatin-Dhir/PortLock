@@ -687,14 +687,24 @@ PRIVATE_LISTING = (
 )
 
 
-def test_icacls_ensure_private_strips_inheritance_and_grants_system_and_admins() -> None:
+def test_icacls_ensure_private_takes_ownership_then_restricts_and_grants() -> None:
     runner = FakeCommandRunner()
     runner.respond(("icacls.exe", WIN_DIR), CommandResult(0, stdout=PRIVATE_LISTING))
     made: list[str] = []
     privacy = IcaclsDirPrivacy(runner, icacls="icacls.exe", makedirs=made.append)
     privacy.ensure_private(Path(WIN_DIR))
     assert made == [WIN_DIR]
+    # Ownership first: whoever owns a directory can rewrite its access list, so a folder a
+    # standard user created beforehand must stop being theirs before anything else.
     assert runner.commands()[0] == (
+        "icacls.exe",
+        WIN_DIR,
+        "/setowner",
+        "*S-1-5-32-544",
+        "/T",
+        "/C",
+    )
+    assert runner.commands()[1] == (
         "icacls.exe",
         WIN_DIR,
         "/inheritance:r",
@@ -706,8 +716,22 @@ def test_icacls_ensure_private_strips_inheritance_and_grants_system_and_admins()
         "*S-1-5-11",
         "*S-1-5-32-545",
         "*S-1-3-0",
+        "/T",
+        "/C",
     )
-    assert runner.commands()[1] == ("icacls.exe", WIN_DIR)
+    assert runner.commands()[2] == ("icacls.exe", WIN_DIR)
+
+
+def test_icacls_ensure_private_fails_closed_when_ownership_cannot_be_taken() -> None:
+    runner = FakeCommandRunner()
+    runner.respond(("icacls.exe", WIN_DIR), CommandResult(0, stdout=PRIVATE_LISTING))
+    runner.respond(
+        ("icacls.exe", WIN_DIR, "/setowner"), CommandResult(5, stderr="Access is denied.")
+    )
+    privacy = IcaclsDirPrivacy(runner, icacls="icacls.exe", makedirs=lambda path: None)
+    with pytest.raises(EnforcementError, match="take ownership"):
+        privacy.ensure_private(Path(WIN_DIR))
+    assert len(runner.commands()) == 1  # nothing was granted over a directory it does not own
 
 
 def test_icacls_check_accepts_only_system_and_administrators() -> None:

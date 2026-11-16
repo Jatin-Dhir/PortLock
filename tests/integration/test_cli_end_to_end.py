@@ -395,6 +395,34 @@ def test_lockdown_engaged_and_confirmed_in_one_command_then_renewed_and_lifted(r
     assert rig.cli("lockdown", "lift").code == EXIT_FAILED  # nothing to lift
 
 
+def test_the_cli_lifts_a_lockdown_while_the_network_is_locked_out_of_that_account(
+    rig: Rig,
+) -> None:
+    import http.client
+
+    assert rig.cli("lockdown", "engage", "--minutes", "5", "--confirm").code == EXIT_OK
+    runtime = read_runtime_file(rig.sim.config.paths.state_dir)
+    assert runtime is not None
+    # Any local program, no credentials: failed logins for the administrator's name keep
+    # the network lockout alive (DESIGN 14.21 says it must never block the elevated CLI).
+    for _ in range(6):
+        connection = http.client.HTTPConnection(runtime["host"], runtime["port"], timeout=10)
+        try:
+            body = json.dumps({"username": "admin", "password": "a wrong passphrase 123"})
+            connection.request(
+                "POST", "/api/v1/auth/login", body, {"Content-Type": "application/json"}
+            )
+            reply = connection.getresponse()
+            reply.read()
+        finally:
+            connection.close()
+    assert reply.status == 429
+    lifted = rig.cli("lockdown", "lift")
+    assert lifted.code == EXIT_OK, lifted.err
+    assert "The lockdown is lifted." in lifted.out
+    assert "no lockdown" in rig.cli("lockdown", "status").out
+
+
 def test_a_lockdown_is_confirmed_by_a_separate_command_over_the_same_channel(rig: Rig) -> None:
     engaged = rig.cli("lockdown", "engage")
     assert engaged.code == EXIT_OK and "Confirm with: portlock confirm" in engaged.out

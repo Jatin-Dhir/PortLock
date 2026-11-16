@@ -140,5 +140,48 @@ def test_the_newest_timestamp_survives_a_clock_set_back(
     clock.set(late - timedelta(hours=1))
     writer("service.stopped")
     assert writer.newest_timestamp == late
-    # A new writer on the same log learns it from the tail.
-    assert AuditWriter(log, bus=bus, clock=clock).newest_timestamp == late - timedelta(hours=1)
+    # A new writer on the same log learns the highest time, not the last record's: the
+    # records written after the rollback carry earlier times (DESIGN 14.12).
+    assert AuditWriter(log, bus=bus, clock=clock).newest_timestamp == late
+    assert log.newest_timestamp() == late
+
+
+def test_the_newest_timestamp_of_an_empty_log_is_none(log: AuditLog) -> None:
+    assert log.newest_timestamp() is None
+
+
+def test_a_new_event_never_overtakes_the_backlog_event_being_flushed(
+    log: AuditLog, bus: EventBus, clock: FakeClock, flaky: Flaky
+) -> None:
+    writer = AuditWriter(log, bus=bus, clock=clock)
+    flaky.error = OSError("disk full")
+    writer("device.connected", data={"n": 1})
+    flaky.error = None
+    real = flaky.real
+    raced: list[Any] = []
+
+    def append_while_another_thread_writes(*args: Any, **kwargs: Any) -> Any:
+        if not raced:
+            # Another thread audits while the backlogged event is on its way in.
+            raced.append(writer("device.connected", data={"n": 2}))
+        return real(*args, **kwargs)
+
+    flaky.real = append_while_another_thread_writes  # type: ignore[assignment]
+    assert writer.flush_backlog() == 2
+    assert raced == [None]  # it was queued behind the older event, not written ahead of it
+    assert [r.data["n"] for r in log.iterate()] == [1, 2]
+    assert writer.backlog == 0
+
+
+def test_a_failed_flush_keeps_the_oldest_event_first(
+    log: AuditLog, bus: EventBus, clock: FakeClock, flaky: Flaky
+) -> None:
+    writer = AuditWriter(log, bus=bus, clock=clock, max_backlog=3)
+    flaky.error = OSError("disk full")
+    for index in range(3):
+        writer("device.connected", data={"n": index})
+    assert writer.flush_backlog() == 0  # still failing: nothing is lost or reordered
+    assert writer.backlog == 3 and writer.dropped == 0
+    flaky.error = None
+    writer.flush_backlog()
+    assert [r.data["n"] for r in log.iterate()] == [0, 1, 2]
