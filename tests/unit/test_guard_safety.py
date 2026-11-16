@@ -314,7 +314,12 @@ def test_mixed_devices_are_protected_only_by_facts_they_cannot_fake() -> None:
         (make_device(interfaces=(CDC_ECM,)), False, False),
         (make_device(interfaces=(AUDIO,)), False, False),
         (make_device(interfaces=(UsbInterface(0xE0, 0x01, 0x01),)), False, False),
-        (make_device(interfaces=(BOOT_KEYBOARD, CDC_ECM)), False, False),
+        # Input beside another function is in every scope (section 14.5).
+        (make_device(interfaces=(BOOT_KEYBOARD, CDC_ECM)), True, True),
+        (make_device(interfaces=(BOOT_KEYBOARD, CDC_ACM)), True, True),
+        (make_device(interfaces=(GENERIC_HID, AUDIO)), True, True),
+        (make_device(interfaces=(BOOT_MOUSE, VENDOR)), True, True),
+        (make_device(interfaces=(BOOT_KEYBOARD, HUB, CDC_ECM)), True, True),
     ],
 )
 def test_scope_decides_which_devices_can_be_enforced_against(
@@ -343,6 +348,24 @@ def test_the_storage_scope_covers_imaging_devices() -> None:
     assert verdict == UNPROTECTED and verdict.enforceable
     reason = _verdict(make_device(interfaces=(AUDIO,))).scope_reason
     assert "mass storage and imaging devices" in reason
+    assert "beside an input interface" in reason
+
+
+def test_the_default_scope_enforces_input_mixed_with_another_function() -> None:
+    # Section 14.5: the default policy denies these, and the default scope must let that
+    # denial reach the operating system.
+    fake = FakeEnforcer()
+    safe = SafeEnforcer(fake, SafetyContext, dry_run=False)
+    tap = make_device(instance_id="test/9-1", interfaces=(BOOT_KEYBOARD, CDC_ECM))
+    verdict = safe.protection(tap)
+    assert verdict.enforceable and verdict.scope_reason == ""
+    result = safe.block(tap)
+    assert result.ok and result.mechanism == "fake:authorized"
+    assert fake.is_blocked(tap)
+    # A keyboard that is only a keyboard stays protected and untouched.
+    board = keyboard()
+    assert safe.block(board).mechanism == "refused"
+    assert not fake.is_blocked(board)
 
 
 def test_scope_and_protection_are_reported_independently() -> None:
@@ -513,7 +536,7 @@ def test_restricting_a_protected_device_is_refused(
     ("device", "context"),
     [
         (make_device(interfaces=(CDC_ACM,)), SafetyContext()),
-        (make_device(interfaces=(BOOT_KEYBOARD, CDC_ECM)), SafetyContext()),
+        (make_device(interfaces=(CDC_ECM,)), SafetyContext()),
         (make_device(interfaces=(AUDIO,)), SafetyContext(scope="storage_and_unknown")),
         (keyboard(), SafetyContext(hid_enforcement_enabled=True)),
     ],

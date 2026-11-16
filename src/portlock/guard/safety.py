@@ -28,6 +28,10 @@ presents the reader as a separate device downstream). Such devices get no catego
 protection; they are still protected if pinned, enrolled, built in or backing the system
 volume, because those facts come from the administrator or the platform.
 
+Every scope, the default ``storage`` included, covers mass storage, imaging devices and
+every device that mixes an input interface with another function (section 14.5), so the
+default policy's denial of those devices is actually enforced.
+
 Being **outside the enforcement scope is not protection** (section 14.5). It is reported
 separately (``ProtectionVerdict.in_scope``), and :class:`SafeEnforcer` answers a
 restricting call on such a device with ``mechanism="out-of-scope"``, never ``"refused"``,
@@ -276,19 +280,25 @@ def is_protected(
 def _in_scope(device: UsbDevice, scope: str) -> bool:
     if scope == SCOPE_ALL_EXCEPT_PROTECTED:
         return True
-    if device.is_storage_like:
+    # Every scope covers storage-like devices and devices that put another function
+    # beside an input interface (section 14.5). The default policy denies the latter as
+    # the shape of a "BadUSB" or network-tap implant; leaving them outside the default
+    # scope would make that denial a record that nothing enforces.
+    if device.is_storage_like or device.mixes_input_with_other:
         return True
     if scope == SCOPE_STORAGE_AND_UNKNOWN:
         return device.categories <= _UNKNOWN_CATEGORIES
-    # SCOPE_STORAGE: only mass storage and imaging devices may be enforced against.
+    # SCOPE_STORAGE covers nothing else.
     return False
 
 
 def _scope_reason(scope: str) -> str:
+    mixed = "devices that put another function beside an input interface"
     covered = {
-        SCOPE_STORAGE: "mass storage and imaging devices",
+        SCOPE_STORAGE: f"mass storage and imaging devices, and {mixed}",
         SCOPE_STORAGE_AND_UNKNOWN: (
-            "mass storage and imaging devices, and devices that declare nothing recognisable"
+            f"mass storage and imaging devices, {mixed}, and devices that declare "
+            "nothing recognisable"
         ),
     }.get(scope, "every device")
     return f'it is outside the enforcement scope "{scope}", which covers only {covered}'
