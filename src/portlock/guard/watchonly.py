@@ -45,6 +45,7 @@ from portlock.core.config import (
     LOCATION_SHARED,
     LOCATION_UNCONFIRMED,
     Config,
+    in_account_home,
     per_user_cause,
 )
 from portlock.core.models import UsbDevice
@@ -202,9 +203,15 @@ def detect_posture(
     is_elevated = process_elevated() if elevated is None else elevated is True
     cause = per_user_cause(config.paths, platform=platform, env=env)
     windows = (sys.platform if platform is None else platform) == "win32"
-    if cause == LOCATION_OWN and is_elevated and not windows:
-        # Root's own home (/root): not a user's profile, but no place for the state of
-        # an enforcing service either, and the message must say so.
+    if (
+        cause == LOCATION_OWN
+        and is_elevated
+        and not windows
+        and in_account_home(config.paths, platform=platform, env=env)
+    ):
+        # Root's own home (/root, as the account database gives it): not a user's
+        # profile, but no place for the state of an enforcing service either, and the
+        # message must say so. A HOME left pointing elsewhere is not root's home.
         cause = CAUSE_ACCOUNT_HOME
     return Posture(elevated=is_elevated, system_wide=cause is None, cause=cause)
 

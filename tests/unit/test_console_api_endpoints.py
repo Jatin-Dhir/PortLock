@@ -1228,7 +1228,11 @@ def test_default_deny_is_a_commit_confirm_change_when_turned_on(
     assert off.status == 200 and off.json["enabled"] is False and off.json["change"] is None
     on = admin.put("/default-deny", {"enabled": True})
     assert on.status == 200 and on.json["change"]["kind"] == "default_deny"
-    assert admin.get("/default-deny").json == {"enabled": True, "stored": True, "note": None}
+    # Stored on, but not in force in monitor mode: "enabled" means in force (fourth pass,
+    # D4), and the note says why.
+    stored = admin.get("/default-deny").json
+    assert (stored["enabled"], stored["stored"]) == (False, True)
+    assert stored["note"].startswith("Default-deny is stored on but not in force")
     assert admin.post(f"/changes/{on.json['change']['id']}/cancel").status == 200
     assert admin.get("/default-deny").json == {"enabled": False, "stored": False, "note": None}
 

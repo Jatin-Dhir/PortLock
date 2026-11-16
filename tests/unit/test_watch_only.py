@@ -116,8 +116,10 @@ NATIVE = "win32" if sys.platform == "win32" else "linux"
 PROGRAM = "python -m portlock"
 SRC = Path(__file__).resolve().parents[2] / "src"
 ALL_ENGINES = ("heuristics", "hashset", "clamav", "defender")
-# How an elevated process names its own profile: root's home on POSIX (C3).
-OWN_WORDS = "own folders" if NATIVE == "win32" else "home folder of the account that runs it"
+# How an elevated process names a profile that HOME or USERPROFILE gives it. On POSIX it
+# is "the home folder of the account that runs it" only for the home the account database
+# gives that account (fourth pass, D7), never for a HOME under tmp_path.
+OWN_WORDS = "own folders"
 
 
 # --- tripwires ------------------------------------------------------------------------------
@@ -1117,7 +1119,11 @@ def test_another_spelling_of_the_profile_is_not_system_wide_on_windows(state: st
 def test_a_system_wide_location_is_recognised_on_windows() -> None:
     paths = win_paths("C:\\ProgramData\\PortLock")
     assert not paths_per_user(paths, platform="win32", env=WIN_PROFILE)
-    assert not paths_per_user(paths, platform="win32", env={})
+    # With nothing in the environment only the registry (Windows itself; a fixed fake in
+    # the unit tests) says where the profiles are; elsewhere nothing does, which fails
+    # closed (fourth pass, D2).
+    assert paths_per_user(paths, platform="win32", env={}) is (sys.platform != "win32")
+    assert not paths_per_user(paths, platform="win32", env={"SystemDrive": "C:"})
     # The configuration directory counts as much as the state directory.
     mixed = win_paths("C:\\ProgramData\\PortLock", "C:\\Users\\Alice\\cfg")
     assert paths_per_user(mixed, platform="win32", env=WIN_PROFILE)

@@ -82,6 +82,7 @@ __all__ = [
     "ScanConfig",
     "config_to_toml",
     "default_config",
+    "in_account_home",
     "load_config",
     "paths_per_user",
     "per_user_cause",
@@ -886,14 +887,23 @@ def per_user_cause(
 
     * :data:`LOCATION_OWN`: a directory lies inside the current user's own profile. On
       Windows ``USERPROFILE``, ``LOCALAPPDATA`` and ``APPDATA`` (a profile whose
-      application data was redirected), elsewhere ``HOME`` unless it is ``/``.
+      application data was redirected), elsewhere ``HOME`` unless it is ``/`` and, on
+      the running system, the home the account database gives the effective user (so
+      root's ``/root`` counts when ``HOME`` is unset or ``/``).
     * :data:`LOCATION_OTHER_USER`: a directory lies inside another user's profile. On
-      Windows everything under the profiles root (the parent of ``USERPROFILE``); on
-      POSIX everything under ``/home`` and ``/Users`` and, on the running system, the
-      home directory of the user who started ``sudo``, ``doas`` or ``pkexec``
-      (``SUDO_USER``, ``DOAS_USER``, ``PKEXEC_UID``). An elevated window opened with
-      another administrator's credentials, or ``sudo PORTLOCK_HOME=/home/alice/pl``,
-      must not class that user's folder as system-wide.
+      Windows everything in the folder that holds the users' profiles, from sources that
+      do not depend on who runs PortLock: ``ProfilesDirectory`` in the registry (read
+      only, on Windows itself), ``Users`` on ``SystemDrive``, the parent of ``PUBLIC``
+      and the parent of ``USERPROFILE``; when none is known the answer is
+      :data:`LOCATION_UNCONFIRMED`. On POSIX everything under ``/home`` and ``/Users``
+      and, on the running system, the home of every login account in the account
+      database (uid at least ``UID_MIN``, home a real directory other than ``/``), under
+      WSL ``/mnt/<drive>/Users``, and the home directory of the user who started
+      ``sudo``, ``doas`` or ``pkexec`` (``SUDO_USER``, ``DOAS_USER``, ``PKEXEC_UID``).
+      Other accounts' homes are compared before ``HOME``. An elevated window opened with
+      another administrator's credentials, PortLock run as SYSTEM, or
+      ``sudo PORTLOCK_HOME=/home/alice/pl``, must not class that user's folder as
+      system-wide.
     * :data:`LOCATION_SHARED`: a directory lies inside the folder every user shares
       (``PUBLIC`` on Windows).
     * :data:`LOCATION_UNCONFIRMED`: the location cannot be shown to be local and
@@ -914,7 +924,9 @@ def per_user_cause(
     one; a profile variable that is set but empty, relative or unresolvable; a
     ``USERPROFILE`` or ``LOCALAPPDATA`` that is a UNC path; a device-namespace profile
     variable; a profile variable that is a UNC path to this computer (``localhost``,
-    ``127.x``, ``::1``, the computer's own name); a ``SUDO_USER``, ``DOAS_USER`` or
+    ``127.x``, ``::1``, the computer's own name, a trailing dot, or a name that resolves
+    to a loopback address or one of this computer's own addresses; see
+    :func:`_remote_server`); a ``SUDO_USER``, ``DOAS_USER`` or
     ``PKEXEC_UID`` whose home directory cannot be found. A redirected ``APPDATA`` or
     ``PUBLIC`` that is a UNC path to *another* computer (Folder Redirection on a domain
     PC) is skipped instead: no local directory can lie inside it.
@@ -940,6 +952,37 @@ def per_user_cause(
     return None
 
 
+def in_account_home(
+    paths: PathsConfig, *, platform: str | None = None, env: Mapping[str, str] | None = None
+) -> bool:
+    """True if a directory lies in the home of the account that runs this process (POSIX).
+
+    On the running system the home is the one the account database gives the effective
+    user (root's ``/root``), never ``HOME``, which ``su`` or ``sudo`` may have left
+    pointing at another user's home. For a foreign ``platform`` (tests) only ``HOME`` is
+    there to compare with. Always False on Windows.
+    """
+    resolved_platform = sys.platform if platform is None else platform
+    if _is_windows(resolved_platform):
+        return False
+    resolved_env = os.environ if env is None else env
+    native = sys.platform != "win32"
+    if native:
+        home = _effective_account_home()
+    else:
+        value = resolved_env.get("HOME")
+        home = None if value is None else _comparable(value, windows=False, native=False)
+        if home == "/":
+            home = None
+    if home is None:
+        return False
+    for directory in (paths.state_dir, paths.config_dir):
+        candidate = _comparable(PurePath(directory).as_posix(), windows=False, native=native)
+        if candidate is not None and _within(candidate, home, windows=False):
+            return True
+    return False
+
+
 class _Unconfirmed(Exception):
     """A profile variable makes the location impossible to confirm (fail closed)."""
 
@@ -955,47 +998,244 @@ def _profile_roots(env: Mapping[str, str], *, windows: bool, native: bool) -> li
     """``(cause, comparable root)`` pairs, most specific first.
 
     Raises:
-        _Unconfirmed: a variable is set but cannot be used (fail closed).
+        _Unconfirmed: a variable is set but cannot be used, or (Windows) no folder that
+            holds the users' profiles is known at all (fail closed).
     """
     own: list[str] = []
     shared: list[str] = []
     others: list[str] = []
     invoking: list[str] = []
+    account: list[str] = []
+    accounts: list[str] = []
     if windows:
         for name in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
             root = _variable_root(env, name, windows=True, native=native)
             if root is not None:
                 own.append(root)
-        profile = _variable_root(env, "USERPROFILE", windows=True, native=native)
-        if profile is not None:
-            others.append(ntpath.dirname(profile.rstrip("\\")) or profile)
+        others.extend(_windows_profiles_roots(env, native=native))
         public = _variable_root(env, "PUBLIC", windows=True, native=native)
         if public is not None:
             shared.append(public)
     else:
-        home = _variable_root(env, "HOME", windows=False, native=native)
-        if home is not None and home != "/":
-            # Root's home is "/" on many systems: that is the whole disk, not a profile.
-            own.append(home)
-        for fixed in ("/home", "/Users"):
-            root = _comparable(fixed, windows=False, native=native)
-            if root is None:
-                raise _Unconfirmed(fixed)
-            others.append(root)
         if native:
             for account_home in _elevating_homes(env):
                 root = _comparable(account_home, windows=False, native=True)
                 if root is None or root == "/":
                     raise _Unconfirmed(account_home)
                 invoking.append(root)
+            # The account database says whose home is whose, whatever HOME says: this
+            # account's own home is always a root (so /root counts even when HOME is
+            # unset or "/"), and every other login account's home is another user's.
+            mine = _effective_account_home()
+            if mine is not None:
+                account.append(mine)
+            accounts.extend(home for home in _login_account_homes() if home not in account)
+        home = _variable_root(env, "HOME", windows=False, native=native)
+        if home is not None and home != "/":
+            # Root's home is "/" on many systems: that is the whole disk, not a profile.
+            own.append(home)
+        fixed = ["/home", "/Users"]
+        if native:
+            fixed.extend(_wsl_windows_profiles())
+        for name in fixed:
+            root = _comparable(name, windows=False, native=native)
+            if root is None:
+                raise _Unconfirmed(name)
+            others.append(root)
     # The invoking user's home comes first: a sudo that keeps HOME would otherwise make
-    # that user's folder look like the elevated account's own.
+    # that user's folder look like the elevated account's own. Other accounts' homes come
+    # before HOME for the same reason (``su`` without ``-`` keeps the old HOME).
     return (
         [(LOCATION_OTHER_USER, root) for root in invoking]
+        + [(LOCATION_OWN, root) for root in account]
+        + [(LOCATION_OTHER_USER, root) for root in accounts]
         + [(LOCATION_OWN, root) for root in own]
         + [(LOCATION_SHARED, root) for root in shared]
         + [(LOCATION_OTHER_USER, root) for root in others]
     )
+
+
+#: Where Windows keeps the list of user profiles (a read-only lookup).
+_PROFILE_LIST_KEY = (
+    "SOFTWARE"
+    + chr(92)
+    + "Microsoft"
+    + chr(92)
+    + "Windows NT"
+    + chr(92)
+    + ("CurrentVersion" + chr(92) + "ProfileList")
+)
+_DRIVE = re.compile(r"[A-Za-z]:\Z")
+_BACKSLASH = chr(92)
+
+
+def _windows_profiles_roots(env: Mapping[str, str], *, native: bool) -> list[str]:
+    """Every folder known to hold the profiles of this computer's users.
+
+    The parent of ``USERPROFILE`` alone is not enough: for SYSTEM, LocalService or an
+    empty environment it is not the folder that holds the users' profiles. So also the
+    parent of ``PUBLIC`` (unless it is a UNC path), ``Users`` on ``SystemDrive`` and, on
+    Windows itself, ``ProfilesDirectory`` from the registry (read only), none of which
+    depends on who runs PortLock.
+
+    Raises:
+        _Unconfirmed: none of them is known, or ``SystemDrive`` is set but unusable.
+    """
+    roots: list[str] = []
+    profile = _variable_root(env, "USERPROFILE", windows=True, native=native)
+    if profile is not None:
+        roots.append(ntpath.dirname(profile.rstrip(_BACKSLASH)) or profile)
+    public = _variable_root(env, "PUBLIC", windows=True, native=native)
+    if public is not None:
+        # _variable_root skips a PUBLIC on another computer and refuses one on this
+        # computer, so what is left here is a local folder.
+        roots.append(ntpath.dirname(public.rstrip(_BACKSLASH)) or public)
+    drive = _env_value(env, "SYSTEMDRIVE", windows=True)
+    if drive is not None:
+        if not _DRIVE.match(drive.strip()):
+            raise _Unconfirmed("SystemDrive")
+        root = _comparable(drive.strip() + _BACKSLASH + "Users", windows=True, native=native)
+        if root is None:
+            raise _Unconfirmed("SystemDrive")
+        roots.append(root)
+    if native and sys.platform == "win32":
+        registered = _registry_profiles_directory()
+        if registered is not None:
+            root = _comparable(registered, windows=True, native=True)
+            if root is not None:
+                roots.append(root)
+    if not roots:
+        raise _Unconfirmed("the folder that holds the users' profiles")
+    return list(dict.fromkeys(roots))
+
+
+def _registry_profiles_directory() -> str | None:
+    """``ProfilesDirectory`` from the registry, expanded; ``None`` if it cannot be read.
+
+    A read-only lookup, on Windows only: the key is opened for reading, and nothing is
+    ever written.
+    """
+    if sys.platform != "win32":
+        return None
+    import winreg  # Windows only, and only needed here
+
+    return _read_profiles_directory(winreg)
+
+
+def _read_profiles_directory(winreg: Any) -> str | None:
+    """:func:`_registry_profiles_directory` with the ``winreg`` module handed in (tests).
+
+    Only ``OpenKey`` with read access, ``QueryValueEx`` and ``ExpandEnvironmentStrings``
+    are used.
+    """
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            _PROFILE_LIST_KEY,
+            0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            value, kind = winreg.QueryValueEx(key, "ProfilesDirectory")
+    except OSError:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if kind == winreg.REG_EXPAND_SZ:
+        value = winreg.ExpandEnvironmentStrings(value)
+    return str(value)
+
+
+def _effective_account_home() -> str | None:
+    """The comparable home of the account this process runs as, from the account
+    database (not ``HOME``); ``None`` when unknown or ``/``."""
+    uid = _effective_uid()
+    if uid is None:
+        return None
+    found = _account_home(str(uid), by_uid=True)
+    if found is None:
+        return None
+    root = _comparable(found[1], windows=False, native=True)
+    return None if root is None or root == "/" else root
+
+
+def _login_account_homes() -> list[str]:
+    """The comparable homes of every login account in the account database.
+
+    A login account has a uid of at least ``UID_MIN`` (``/etc/login.defs``, 1000 when it
+    says nothing) and a home that is a real directory other than ``/``. Homes outside
+    ``/home`` (``/export/home``, ``/var/home``, ``/srv/users``) are found this way.
+    """
+    minimum = _uid_min()
+    homes: list[str] = []
+    for uid, home in _accounts():
+        if uid < minimum or not home:
+            continue
+        try:
+            if not os.path.isdir(home):
+                continue
+        except (OSError, ValueError):
+            continue
+        root = _comparable(home, windows=False, native=True)
+        if root is not None and root != "/" and root not in homes:
+            homes.append(root)
+    return homes
+
+
+def _accounts() -> list[tuple[int, str]]:
+    """``(uid, home directory)`` of every account in the account database (POSIX)."""
+    try:
+        import pwd  # POSIX only, and only needed here
+    except ImportError:
+        return []
+    try:
+        return [(entry.pw_uid, entry.pw_dir) for entry in pwd.getpwall()]
+    except OSError:
+        return []
+
+
+_LOGIN_DEFS = Path("/etc/login.defs")
+_DEFAULT_UID_MIN = 1000
+_WSL_MOUNTS = "/mnt"
+
+
+def _uid_min() -> int:
+    """``UID_MIN`` from ``/etc/login.defs``; 1000 when it is absent, unreadable or says
+    nothing usable."""
+    try:
+        text = _LOGIN_DEFS.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _DEFAULT_UID_MIN
+    for line in text.splitlines():
+        words = line.split()
+        if len(words) >= 2 and words[0] == "UID_MIN" and words[1].isdigit():
+            return int(words[1], 10)
+    return _DEFAULT_UID_MIN
+
+
+def _wsl_windows_profiles() -> list[str]:
+    """Under WSL, the Windows profiles folder of every mounted drive (``/mnt/c/Users``)."""
+    if not _running_under_wsl():
+        return []
+    try:
+        names = os.listdir(_WSL_MOUNTS)
+    except OSError:
+        return []
+    return [
+        posixpath.join(_WSL_MOUNTS, name, "Users")
+        for name in sorted(names)
+        if len(name) == 1 and name.isascii() and name.isalpha()
+    ]
+
+
+def _running_under_wsl() -> bool:
+    """True inside the Windows Subsystem for Linux (read-only checks)."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    uname = getattr(os, "uname", None)
+    if uname is None:
+        return False
+    release = uname().release.lower()
+    return "microsoft" in release or "wsl" in release
 
 
 def _variable_root(env: Mapping[str, str], name: str, *, windows: bool, native: bool) -> str | None:
@@ -1043,43 +1283,94 @@ def _unc_server(text: str) -> str | None:
 
 
 def _remote_server(server: str, env: Mapping[str, str], *, native: bool) -> bool:
-    """True only if ``server`` provably names another computer (fail closed)."""
-    name = server.lower().strip("[]")
+    """True only if ``server`` provably names another computer (fail closed).
+
+    A trailing dot (``127.0.0.1.``, ``localhost.``) is the same name. On the running
+    system a name is also resolved (IPv4 and IPv6): one that resolves to a loopback
+    address or to one of this computer's own addresses (a DNS alias of it, its IPv6
+    address) is this computer. A name that does not resolve at all is taken for another
+    computer that cannot be reached now (a file server seen from an offline laptop).
+    """
+    name = server.lower().strip().strip("[]").rstrip(".")
     if not name or name in (".", "?") or name == "localhost" or name.startswith("localhost."):
         return False
     if name.endswith(".ipv6-literal.net"):
         # Windows' spelling of an IPv6 address in a UNC path: 0--1.ipv6-literal.net is ::1.
         name = name[: -len(".ipv6-literal.net")].replace("-", ":").replace("s", "%")
-    try:
-        address = ipaddress.ip_address(name.split("%", 1)[0])
-    except ValueError:
-        address = None
+    address = _address(name)
     if address is not None:
         if address.is_loopback or address.is_unspecified:
             return False
-        return str(address) not in _own_addresses(native=native)
+        return address not in _own_addresses(native=native)
     own_names = {
-        value.strip().lower()
+        value.strip().lower().rstrip(".")
         for key, value in env.items()
         if key.upper() == "COMPUTERNAME" and value.strip()
     }
+    host = _host_name() if native else None
+    if host:
+        own_names.update({host, host.split(".", 1)[0]})
+    if name in own_names or name.split(".", 1)[0] in own_names:
+        return False
     if native:
-        with contextlib.suppress(OSError):
-            host = socket.gethostname().strip().lower()
-            if host:
-                own_names.update({host, host.split(".", 1)[0]})
-    return name not in own_names and name.split(".", 1)[0] not in own_names
+        resolved = _lookup(name)
+        if resolved:
+            own = _own_addresses(native=True)
+            if any(item.is_loopback or item.is_unspecified or item in own for item in resolved):
+                return False
+    return True
 
 
-def _own_addresses(*, native: bool) -> frozenset[str]:
-    """The addresses this computer's own name resolves to (running system only)."""
+_IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _address(text: str) -> _IPAddress | None:
+    """``text`` as an IP address without its zone (``fe80::1%4`` is ``fe80::1``)."""
+    try:
+        address = ipaddress.ip_address(text.split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
+def _host_name() -> str | None:
+    """This computer's own name, lower case, without a trailing dot."""
+    try:
+        host = socket.gethostname()
+    except OSError:
+        return None
+    host = host.strip().lower().rstrip(".")
+    return host or None
+
+
+def _lookup(name: str) -> frozenset[_IPAddress]:
+    """Every IPv4 and IPv6 address ``name`` resolves to (empty when it does not)."""
+    try:
+        answers = socket.getaddrinfo(name, None, family=socket.AF_UNSPEC)
+    except (OSError, UnicodeError, ValueError):
+        return frozenset()
+    found: set[_IPAddress] = set()
+    for _family, _type, _proto, _canonical, sockaddr in answers:
+        address = _address(str(sockaddr[0])) if sockaddr else None
+        if address is not None:
+            found.add(address)
+    return frozenset(found)
+
+
+def _own_addresses(*, native: bool) -> frozenset[_IPAddress]:
+    """The addresses of this computer's own name, IPv4 and IPv6 (running system only)."""
     if not native:
         return frozenset()
-    try:
-        _name, _aliases, addresses = socket.gethostbyname_ex(socket.gethostname())
-    except (OSError, UnicodeError):
+    host = _host_name()
+    if host is None:
         return frozenset()
-    return frozenset(addresses)
+    found = set(_lookup(host))
+    with contextlib.suppress(OSError, UnicodeError):
+        _name, _aliases, addresses = socket.gethostbyname_ex(host)
+        found.update(item for item in map(_address, addresses) if item is not None)
+    return frozenset(found)
 
 
 def _elevating_homes(env: Mapping[str, str]) -> list[str]:

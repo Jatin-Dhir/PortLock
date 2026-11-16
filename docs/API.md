@@ -455,9 +455,9 @@ watch-only and every mechanism is probed.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `config` | object | `Config.to_dict()`: the configuration file as loaded. Read-only here |
-| `runtime` | {`protected_fingerprints`: array<fingerprint>, `scan.enabled`: bool, `lockdown.default_minutes`: int, `scope`: string, `default_deny`: bool} | the three values `PATCH /settings` can change, and the two that have their own endpoints (`/scope`, `/default-deny`); `default_deny` is the value in force (as `GET /default-deny`'s `enabled`) |
-| `effective` | {`scan_enabled`: bool, `lockdown_default_minutes`: int, `hid_enforcement_enabled`: bool, `scope`: string, `fail_closed`: bool, `baseline_read_only`: bool, `default_deny`: bool} | what is in force |
-| `notes` | array<string> | sentences about settings that do not take effect as stored: in a watch-only process, a default-deny an earlier run stored on ("A default-deny setting stored by an earlier run is ignored: ..."); otherwise empty |
+| `runtime` | {`protected_fingerprints`: array<fingerprint>, `scan.enabled`: bool, `lockdown.default_minutes`: int, `scope`: string, `default_deny`: bool} | the three values `PATCH /settings` can change, and the two that have their own endpoints (`/scope`, `/default-deny`); `default_deny` is the standing setting **in force**, exactly `GET /default-deny`'s `enabled`: stored on, enforce mode, and no latched kill switch (never in a watch-only process). The stored choice is `GET /default-deny`'s `stored` |
+| `effective` | {`scan_enabled`: bool, `lockdown_default_minutes`: int, `hid_enforcement_enabled`: bool, `scope`: string, `fail_closed`: bool, `baseline_read_only`: bool, `default_deny`: bool} | what is in force; `default_deny` is whether the service asks the operating system to deny new devices right now: the standing setting in force, or an active lockdown (which denies new devices in monitor mode too) |
+| `notes` | array<string> | sentences about settings that do not take effect as stored: default-deny stored on but not in force, with the reason (`GET /default-deny`'s `note`: monitor mode, the kill switch, or watch-only); otherwise empty |
 
 ### 4.17 `Change` (a change waiting for confirmation)
 
@@ -1234,21 +1234,34 @@ commit-confirm; narrowing is not. Response 200: `scope`, `summary` (or null), `c
 enforcement of DESIGN §2 needs two further settings in the configuration file and is not
 reachable here.)
 
-**`GET /default-deny` — `view`.** Response: `enabled` (bool): standing operating-system
-default-deny for new devices in enforce mode, as it is in force; `stored` (bool): the
-stored setting; `note` (string \| null). A watch-only process denies nothing: there
-`enabled` is false even when an earlier, enforcing run stored it on, `stored` is true and
-`note` says that the stored setting is ignored. Elsewhere `enabled` equals `stored` and
-`note` is null. `portlock default-deny` prints the note under its answer.
+**`GET /default-deny` — `view`.** Response: `enabled` (bool): the standing
+operating-system default-deny for new devices **in force**, which means stored on, the
+effective mode is enforce, and the kill switch is not latched; `stored` (bool): the stored
+choice; `note` (string \| null): why a stored "on" is not in force, null otherwise. So in
+monitor mode, under the kill switch and in a watch-only process `enabled` is false even
+when `stored` is true, and the note says which of the three it is; the choice is kept and
+applies once enforce mode is in force. (An active lockdown denies new devices by itself;
+see `effective.default_deny` in Settings.) `portlock default-deny` prints the note under its
+answer, and the console's control shows the stored choice with the note.
 
 ```json
+// GET /default-deny in monitor mode, stored on
+{"enabled": false, "stored": true,
+ "note": "Default-deny is stored on but not in force: it applies only in enforce mode, and PortLock is in monitor mode now. The choice is kept."}
+// GET /default-deny under a latched kill switch
+{"enabled": false, "stored": true,
+ "note": "Default-deny is stored on but not in force: the kill switch is on, so PortLock enforces nothing until it is removed."}
 // GET /default-deny in a watch-only process that finds it stored on
 {"enabled": false, "stored": true,
  "note": "A default-deny setting stored by an earlier run is ignored: this process is watch-only and denies nothing."}
+// GET /default-deny in enforce mode, stored on
+{"enabled": true, "stored": true, "note": null}
 ```
 
 **`PUT /default-deny` — `change_mode`.** Request: `enabled` (bool). Turning it on is
-applied under commit-confirm. Response 200: `enabled`, `summary`, `change`. Errors: 409
+applied under commit-confirm. Response 200: `enabled` (the stored choice now, not whether
+it is in force: in monitor mode a confirmed "on" is stored and waits for enforce mode),
+`summary`, `change`. Errors: 409
 `watch_only` (turning it on in a watch-only process; nothing is proposed or written, and
 turning it off stays allowed), `killswitch_active`.
 
@@ -1270,11 +1283,13 @@ whose first lines say whether this process is watch-only.
 **`GET /settings` — `view`.** Response: Settings (4.16).
 
 ```json
+// monitor mode, default-deny stored on: not in force, so both default_deny values are false
 {"config": {"mode": "monitor", "scope": "storage", "hid_enforcement": false, "...": "Config.to_dict()"},
  "runtime": {"protected_fingerprints": [], "scan.enabled": true, "lockdown.default_minutes": 60,
              "scope": "storage", "default_deny": false},
  "effective": {"scan_enabled": true, "lockdown_default_minutes": 60, "hid_enforcement_enabled": false,
-               "scope": "storage", "fail_closed": false, "baseline_read_only": false}}
+               "scope": "storage", "fail_closed": false, "baseline_read_only": false, "default_deny": false},
+ "notes": ["Default-deny is stored on but not in force: it applies only in enforce mode, and PortLock is in monitor mode now. The choice is kept."]}
 ```
 
 **`PATCH /settings` — `edit_policy`.** Changes one or more of the three run-time
@@ -1293,7 +1308,8 @@ reach of the web console. Errors: 400 `invalid_request`, 409 `unknown_device`.
 // response 200
 {"config": {"...": "unchanged"}, "runtime": {"protected_fingerprints": ["plk1:k7q2m4xw3n5p6r7s2t4v6y3a5b7c2d4e"],
  "scan.enabled": true, "lockdown.default_minutes": 60, "scope": "storage", "default_deny": false},
- "effective": {"...": "as GET"}, "summary": {"evaluated": 4, "changed": 0, "blocked": 1, "read_only": 0, "released": 0, "failed": 0}}
+ "effective": {"...": "as GET"}, "notes": [],
+ "summary": {"evaluated": 4, "changed": 0, "blocked": 1, "read_only": 0, "released": 0, "failed": 0}}
 ```
 
 ### 6.13 Commit-confirm: pending changes
@@ -1480,7 +1496,7 @@ On reconnect the client sends `Last-Event-ID`; it may instead pass
 | `scan.finished` | `scan`: Scan (no report) | |
 | `lockdown.changed` | `change`: `"engaged"` \| `"renewed"` \| `"lifted"` \| `"expired"`, `lockdown`: Lockdown | |
 | `mode.changed` | `mode`: ModeInfo | includes the kill switch appearing or going away |
-| `settings.changed` | `runtime`: object (as in Settings) | |
+| `settings.changed` | `runtime`: object (as in Settings) | `runtime.default_deny` is default-deny in force (as `GET /default-deny`'s `enabled`), not the stored choice: storing "on" in monitor mode publishes false; read `GET /default-deny` for `stored` |
 | `status.changed` | `degraded`: array<string>, `counts`: object (as in Status) | a degraded flag or a count changed |
 | `alert` | `severity`: string, `title`, `message`: string, `connection_id`: int \| null, `fingerprint` \| null, `audit_seq`: int \| null | something a person should look at: a suspicious device, a scan detection, a decision with `alert`, an enforcement failure |
 | `audit.appended` | `seq`: int, `ts`: time, `event_type`, `severity`: string, `actor`: string \| null, `device_fp` \| null | every audit record (`view_audit` only) |

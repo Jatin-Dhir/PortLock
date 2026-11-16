@@ -135,17 +135,25 @@ by malware, and must never drive the real enforcer, not even from an elevated pr
 "A user's folders" means any user's, not only the account that runs PortLock: an elevated
 process started with another administrator's credentials, or through `sudo` with a
 `PORTLOCK_HOME` in someone else's home, would otherwise enforce from a folder that other
-user can forge. So every profile under the Windows profiles folder and the shared `PUBLIC`
-folder count, and on Linux everything under `/home` and `/Users` and the home of the
-account behind `sudo`, `doas` or `pkexec`; if that account's home cannot be found, the
-location counts as not system-wide. Root's own home (`/root`) is refused too. Another
+user can forge. So every profile in the Windows folder that holds the users' profiles
+(found from the registry, `SystemDrive` and `PUBLIC`, so that it is the same whether
+PortLock runs as an administrator, as SYSTEM or as LocalService) and the shared `PUBLIC`
+folder count, and on Linux everything under `/home` and `/Users`, the home of every login
+account in the account database wherever it lies, the Windows profiles under
+`/mnt/<drive>/Users` in WSL, and the home of the account behind `sudo`, `doas` or `pkexec`;
+if that account's home cannot be found, or (Windows) no profiles folder is known, the
+location counts as not system-wide. Root's own home (`/root`, from the account database,
+not from `HOME`) is refused too. Another
 spelling of the profile (a short name, a `\\?\` path, `..`, a junction, a symbolic link, a
 `subst` drive) is resolved before the comparison, and anything that cannot be resolved
 counts as not system-wide (fail closed). One exception keeps administrators working on
 managed PCs: a profile variable that points to a share on another computer (AppData
 redirected to a file server) is skipped, because no local directory can lie inside it. A
-UNC path to this computer, a UNC `USERPROFILE` or `LOCALAPPDATA`, and a state or
-configuration directory that is itself a UNC or device path still fail closed.
+UNC path to this computer (by any name: a trailing dot, its own IPv4 or IPv6 address, a DNS
+alias that resolves to it or to a loopback address), a UNC `USERPROFILE` or
+`LOCALAPPDATA`, and a state or configuration directory that is itself a UNC or device path
+still fail closed. A server name that does not resolve at all is taken for another
+computer that cannot be reached now (a file server seen from a laptop off the network).
 
 What a watch-only process can do to the machine: nothing outside its own folder. It never
 builds the enforcer, the dead-man timer or the directory-permission tool; inert stand-ins

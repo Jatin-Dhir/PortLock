@@ -3,10 +3,10 @@
 // commit-confirm: it is rolled back unless confirmed from this browser in time.
 
 import { ApiError, api } from "../api.js";
-import { h, replace } from "../dom.js";
+import { h, replace, uid } from "../dom.js";
 import { countdown, plural, timeEl } from "../fmt.js";
 import { can, refreshChanges, scope, setChanges, setLockdown, setMode, state } from "../store.js";
-import { POSTURE_TEXT, WATCH_ONLY_CONTROL_NOTE, isWatchOnly, modeNotes, posture, watchOnlyReason } from "../truth.js";
+import { POSTURE_TEXT, WATCH_ONLY_CONTROL_NOTE, defaultDenyControl, defaultDenyToast, isWatchOnly, modeNotes, posture, watchOnlyReason } from "../truth.js";
 import { button, checkbox, chip, confirmDialog, errorState, field, formDialog, kv, loading, pageHead, panel, reasonFor, select, textInput, toast } from "../ui.js";
 
 const SCOPES = {
@@ -176,29 +176,40 @@ export function mount(root) {
   async function loadDeny() {
     try {
       const reply = await api.get("/default-deny");
-      // Watch-only refuses turning it on; turning it off stays allowed.
-      const locked = isWatchOnly(state.status) && !reply.enabled;
+      // The box shows the stored choice; the note says when it is not in force. Watch-only
+      // refuses turning it on; turning it off stays allowed.
+      const control = defaultDenyControl(reply, state.status);
+      const { locked } = control;
       const toggle = checkbox("Ask the operating system to refuse new devices by default", {
-        checked: reply.enabled,
-        hint: locked ? null : "Only in enforce mode. Turning it on is applied under commit-confirm.",
+        checked: control.checked,
+        hint: control.hint,
       });
       toggle.input.disabled = locked;
       const apply = button("Apply", {
         disabled: !can("change_mode") || locked,
         onClick: async () => {
-          if (toggle.input.checked === reply.enabled) return;
+          if (toggle.input.checked === control.checked) return;
           const turnOn = toggle.input.checked;
           const send = async () => {
             const result = await api.put("/default-deny", { enabled: turnOn });
             addChange(result.change);
-            toast(result.enabled ? "Default-deny is on. Confirm it in the bar at the top." : "Default-deny is off.", "good");
+            toast(defaultDenyToast(result.enabled, state.status), "good");
           };
           if (turnOn) await unlessWatchOnly(send);
           else await send();
           await loadDeny();
         },
       });
-      replace(denyHost, toggle.el, h("div", { class: "row" }, apply, locked ? reasonFor(toggle.input, notHere()) : null));
+      // A ticked box that is not in force must not read as "on" to a screen reader either:
+      // the note describes the checkbox.
+      const note = control.note ? h("p", { class: "note warn", id: uid("deny-note") }, control.note) : null;
+      if (note) toggle.input.setAttribute("aria-describedby", note.id);
+      replace(
+        denyHost,
+        toggle.el,
+        note,
+        h("div", { class: "row" }, apply, locked ? reasonFor(toggle.input, notHere()) : null),
+      );
       if (locked) apply.setAttribute("aria-describedby", toggle.input.getAttribute("aria-describedby"));
     } catch (error) {
       replace(denyHost, errorState(error, loadDeny));

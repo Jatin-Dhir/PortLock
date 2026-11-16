@@ -202,6 +202,25 @@ results.port_hold = {
   monitor_lockdown: T.portHoldText?.(monitorLockdown) ?? null,
   watch_only: T.portHoldText?.(watchOnly) ?? null,
 };
+
+// D4: the default-deny control shows the stored choice, and says when it is not in force.
+const MONITOR_NOTE = "Default-deny is stored on but not in force: it applies only in "
+  + "enforce mode, and PortLock is in monitor mode now. The choice is kept.";
+const IGNORED_NOTE = "A default-deny setting stored by an earlier run is ignored: this "
+  + "process is watch-only and denies nothing.";
+const control = (reply, st) => T.defaultDenyControl?.(reply, st) ?? null;
+results.default_deny = {
+  monitor_stored: control({ enabled: false, stored: true, note: MONITOR_NOTE }, plainMonitor),
+  monitor_off: control({ enabled: false, stored: false, note: null }, plainMonitor),
+  enforcing_on: control({ enabled: true, stored: true, note: null }, enforcing),
+  watch_only_stored: control({ enabled: false, stored: true, note: IGNORED_NOTE }, watchOnly),
+  watch_only_off: control({ enabled: false, stored: false, note: null }, watchOnly),
+  older_service: control({ enabled: true }, enforcing),
+  toast_enforcing: T.defaultDenyToast?.(true, enforcing) ?? null,
+  toast_monitor: T.defaultDenyToast?.(true, plainMonitor) ?? null,
+  toast_monitor_lockdown: T.defaultDenyToast?.(true, monitorLockdown) ?? null,
+  toast_off: T.defaultDenyToast?.(false, plainMonitor) ?? null,
+};
 process.stdout.write(JSON.stringify(results));
 """
 
@@ -881,3 +900,59 @@ def test_the_port_cool_down_is_blocked_only_when_portlock_blocks(said: dict[str,
     )
     assert "watch-only" in hold["watch_only"] and "not really blocked" in hold["watch_only"]
     assert "portHoldText(state.status)" in js_source("views/enrolment.js")
+
+
+# --- D4: default-deny stored but not in force -----------------------------------------------
+
+
+def test_the_default_deny_control_shows_the_stored_choice_with_its_note(
+    said: dict[str, Any],
+) -> None:
+    case = said["default_deny"]
+    # Monitor mode in an elevated, system-wide process: stored on, not in force. The box
+    # stays ticked, so the choice does not look lost, and the note says why it is not in
+    # force.
+    monitor = case["monitor_stored"]
+    assert monitor is not None, "truth.js has no defaultDenyControl"
+    assert monitor["checked"] is True and monitor["inForce"] is False
+    assert monitor["locked"] is False
+    assert monitor["note"].startswith("Default-deny is stored on but not in force")
+    assert "monitor mode" in monitor["note"]
+    assert case["monitor_off"]["checked"] is False and case["monitor_off"]["note"] is None
+    on = case["enforcing_on"]
+    assert (on["checked"], on["inForce"], on["note"]) == (True, True, None)
+    assert on["hint"] == (
+        "Applies only in enforce mode. Turning it on is applied under commit-confirm."
+    )
+    # An older service without "stored" reads as before.
+    assert case["older_service"]["checked"] is True and case["older_service"]["note"] is None
+
+
+def test_the_default_deny_control_keeps_its_watch_only_behaviour(said: dict[str, Any]) -> None:
+    case = said["default_deny"]
+    # Off in watch-only: it cannot be turned on, and no hint promises enforce mode.
+    off = case["watch_only_off"]
+    assert off["locked"] is True and off["checked"] is False and off["hint"] is None
+    # Stored on by an earlier, enforcing run: shown ticked with the note, and turning it
+    # off stays allowed.
+    stored = case["watch_only_stored"]
+    assert stored["checked"] is True and stored["locked"] is False and stored["inForce"] is False
+    assert "is ignored" in stored["note"]
+
+
+def test_the_default_deny_toast_says_on_only_where_it_denies(said: dict[str, Any]) -> None:
+    case = said["default_deny"]
+    assert case["toast_enforcing"] == "Default-deny is on. Confirm it in the bar at the top."
+    stored = (
+        "Default-deny is stored on. It applies only in enforce mode. Confirm it in the bar "
+        "at the top."
+    )
+    assert case["toast_monitor"] == stored
+    assert case["toast_monitor_lockdown"] == stored
+    assert case["toast_off"] == "Default-deny is off."
+    protection = js_source("views/protection.js")
+    assert "defaultDenyControl(reply, state.status)" in protection
+    assert "defaultDenyToast(result.enabled, state.status)" in protection
+    assert "checked: reply.enabled" not in protection
+    # The note describes the checkbox, so a ticked box that is not in force is not read as on.
+    assert 'toggle.input.setAttribute("aria-describedby", note.id)' in protection

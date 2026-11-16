@@ -268,6 +268,41 @@ export const WATCH_ONLY_WHY = "Why";
 /** Beside a control a watch-only process refuses: short, and pointing at the bar's reason. */
 export const WATCH_ONLY_CONTROL_NOTE = "Not available in watch-only. See Why at the top of the page.";
 
+const DEFAULT_DENY_HINT = "Applies only in enforce mode. Turning it on is applied under commit-confirm.";
+const DEFAULT_DENY_NOT_IN_FORCE = "Stored on, but not in force.";
+
+/**
+ * The default-deny control on the Protection page (`GET /default-deny`, docs/API.md).
+ * The checkbox shows the STORED choice, so that a choice kept but not in force (monitor
+ * mode, the kill switch, watch-only) does not look lost; the service's note says why it is
+ * not in force. `enabled` alone means in force. In watch-only it cannot be turned on;
+ * turning a stored choice off stays allowed. An older service without `stored` reads as
+ * before (stored = in force).
+ */
+export function defaultDenyControl(reply, status) {
+  const watchOnly = isWatchOnly(status);
+  const inForce = reply?.enabled === true;
+  const stored = typeof reply?.stored === "boolean" ? reply.stored : inForce;
+  const note = typeof reply?.note === "string" && reply.note.trim() ? reply.note.trim() : null;
+  return {
+    checked: stored,
+    inForce,
+    locked: watchOnly && !stored,
+    hint: watchOnly ? null : DEFAULT_DENY_HINT,
+    note: stored && !inForce ? note || DEFAULT_DENY_NOT_IN_FORCE : null,
+  };
+}
+
+/** The toast after `PUT /default-deny`: "on" is said only where it really denies. */
+export function defaultDenyToast(turnedOn, status) {
+  if (!turnedOn) return "Default-deny is off.";
+  // A lockdown denies new devices by itself; the stored choice still waits for enforce mode.
+  if (!isWatchOnly(status) && status?.mode?.effective_mode === "enforce") {
+    return "Default-deny is on. Confirm it in the bar at the top.";
+  }
+  return "Default-deny is stored on. It applies only in enforce mode. Confirm it in the bar at the top.";
+}
+
 /**
  * Which bar heads every page: the simulation's, the watch-only one, or none. Never both: a
  * simulation is not the real PortLock, and saying both would contradict itself.

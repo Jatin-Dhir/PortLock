@@ -68,3 +68,121 @@ a contract that a fix changed, or (row 4) a wrong value:
 - the busy-server test fills the slots with requests in flight, because idle connections no
   longer hold them (`test_console_api_http.py`, row 14);
 - `test_service_audit.py` expects the later time (row 4).
+
+## Watch-only
+
+Watch-only (`DESIGN.md` 14.28: a PortLock process that is not elevated, or whose files are
+in a user's folders, changes nothing on the computer outside its own folder) was reviewed
+in three rounds on 16 and 17 November 2026. Each round's reviewers worked on the code as
+it then stood, through their own lenses, and reproduced what they found with throwaway
+scripts on fakes and, for the live findings, with the real command line under a flight
+recorder that refuses every program start, registry write and mutating seam. The
+findings chosen for it (the most serious ones) were then re-checked, each by a separate
+skeptic who tried to refute it. **No enforcement mechanism was run against a real device, a real
+registry or a real access list** by the reviewers or by the fixes.
+
+The counts come from the review journals (one result per reviewer and per skeptic); the
+severities are the reviewers', and a skeptic's verdict may have lowered one.
+
+| Round | What was reviewed | Reviewers (lenses) | Findings | Re-checked | Real | Fixed by |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1, 16 November | the first watch-only change (per-user directories and a gate that opened in enforce mode), uncommitted on top of `d781c2a` | 3 (regressions for elevated installations, bypasses, an ordinary user's first run) | 26: 6 high, 11 medium, 9 low | 9 | 9 | `72c451f` (the design was corrected: watch-only is decided once per process, the mode does not decide it) |
+| 2, 17 November | `72c451f` and `6419ea4` | 3 (the guarantee, an administrator's installation, the console) | 20: 3 high, 5 medium, 12 low | 7 | 7 | `36012b4` |
+| 3, 17 November | `36012b4` | 2 (logic, an administrator's installation) | 14: 2 high, 4 medium, 8 low | 4 | 4 | the fourth pass, the commit after `36012b4` |
+
+Every finding that was re-checked was found real; none was refuted. Below, one line for
+each finding that was re-checked or that a reviewer rated high or medium (in round 3, every
+finding). "Re-checked" marks the ones a skeptic confirmed.
+
+**Round 1** (fixed by `72c451f` unless the line says otherwise)
+
+- high, re-checked: a lockdown engaged while watch-only became real when the gate opened,
+  without its dead-man timer. Fixed: the gate is gone; a watch-only process refuses a
+  lockdown.
+- high, re-checked: an elevated system-wide installation in monitor mode never made its
+  directories private. Fixed: they are made private at every start (14.18).
+- high, re-checked (medium in the verdict): a watch-only start after an enforcing run left
+  its changes in place and said nothing was changed. Fixed: such a start is refused.
+- medium: a watch-only start closed journal hold records. Fixed: a stand-in's result never
+  closes a record.
+- high: in monitor mode a lockdown on a system-wide installation did nothing but reported
+  active. Fixed: there it blocks for real, as in section 11.
+- medium: `recover` and the kill switch did nothing against a running watch-only service.
+  Fixed by the corrected design: a watch-only process changes nothing, so there is nothing
+  to undo, and `recover` refuses a per-user home.
+- high, re-checked: in watch-only, approving a drive or requesting a scan started
+  `MpCmdRun.exe`. Fixed: a watch-only scanner has no antivirus engine.
+- medium, re-checked: the stand-in's "ok" closed holds of devices that stayed blocked.
+  Fixed: only a result that really changed the system closes a record.
+- medium, re-checked: the console said a watch-only lockdown blocked all removable storage.
+  Fixed: watch-only is its own posture in the console.
+- medium: an elevated `recover` trusted a journal in a per-user folder. Fixed: it refuses
+  that folder.
+- high, re-checked: the console never read `mode.watch_only` and said a lockdown or
+  default-deny was blocking. Fixed.
+- medium, re-checked (low in the verdict): no test caught watch-only reaching `icacls`
+  when a kill-switch file exists. Fixed: tests that fail under both mutations.
+- medium, re-checked: a killed service left files that ended the next start. Fixed.
+- medium: a failed first `init` lost the audit key for good. Fixed: nothing is created
+  until a password is accepted.
+- medium: the online doctor said the directories were private in watch-only. Fixed: it
+  says they were not checked.
+- medium: the README did not warn against an administrator window. Fixed: it does, and
+  `init` and `run` say which installation an elevated window uses.
+- medium: starting in the stored mode setting was untested. Overtaken: the start-up path it
+  names (the gate opening for a stored "enforce") was removed in `72c451f`; the mode no
+  longer decides watch-only.
+
+**Round 2** (all fixed by `36012b4`)
+
+- medium, re-checked (low in the verdict): in watch-only, device rows showed solid
+  "Denied" and "Read-only" chips under a legend saying solid means really changed. Fixed:
+  intended chips are dashed.
+- high, re-checked: a redirected AppData made an administrator's installation watch-only
+  and `recover` refuse it. Found by two reviewers. Fixed: a profile variable on another
+  computer is skipped.
+- medium, re-checked: another account's folder counted as system-wide. Fixed.
+- medium, re-checked: a journal line this version cannot parse was invisible to the start
+  refusal, and the shutdown erased it. Fixed.
+- high, re-checked: `init` beside a running service broke offline audit verification for
+  good. Fixed: `init` refuses while a service runs from the same folder.
+- medium, re-checked: `init` set aside a key store whose key had been shown. Fixed.
+- medium: the location reason always said "this user's own folders". Fixed: each message
+  is worded from the cause.
+
+**Round 3** (all fixed by the fourth pass; each fix has a test that fails without it, in
+`tests/unit/test_watch_only_pass4.py`, `tests/unit/test_console_js_truth.py` and the live
+test)
+
+- high, re-checked: two `init`s, or a service that came and went while `init` waited, left a
+  shown key that did not verify, a second administrator, or no key. Fixed: `init` takes a
+  snapshot of everything it decides on before the prompt and again under the lock, and
+  changes nothing when they differ.
+- high, re-checked (medium in the verdict): under the SYSTEM account another user's
+  profile counted as system-wide. Fixed: the profiles folder comes from the registry (read
+  only), `SystemDrive` and `PUBLIC` as well, and fails closed when none is known.
+- medium, re-checked; found by both reviewers: on Python 3.13 and later `stop` and
+  `status` said "not running" for a running service whose folder this user cannot search.
+  Fixed: only a missing lock file means free.
+- medium: homes outside `/home` and `/Users` counted as system-wide for root. Fixed: every
+  login account's home in the account database, and `/mnt/<drive>/Users` under WSL.
+- medium, re-checked: default-deny was reported in force in monitor mode. Fixed: `enabled`
+  means in force, `stored` keeps the choice, a note says why; the console shows the stored
+  choice with the note; `API.md` corrected.
+- low: some names for this computer counted as a remote server. Fixed: trailing dots,
+  name resolution (IPv4 and IPv6), own addresses.
+- low: the root wording could call another user's home root's own, and `/root` passed
+  when `HOME` was unset. Fixed: the account database decides.
+- low: `init` said a key store's key was "never shown". Fixed: "that no administrator was
+  set up with".
+- low: each watch-only journal guard was untested on its own. Fixed: a test for each.
+- low: no test for a UNC path to this computer's own address. Fixed.
+- low: `API.md`'s settings examples showed the old shape. Fixed.
+- low: `stop` said `runtime.json` "cannot be read" when it was read but its service did
+  not answer. Fixed: it says the service is probably not running.
+- low: the live test could fail without a fault (a port race, a 10-second limit on a whole
+  process, a kill before `runtime.json` existed). Fixed, without weakening what it asserts.
+
+**The fourth pass was tested but not reviewed again.** Its fixes have tests that fail
+without them and the whole suite passes on Windows and under WSL, but no independent
+reviewer has read it.

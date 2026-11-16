@@ -380,7 +380,21 @@ def test_c3_every_cause_has_its_own_true_reason() -> None:
     assert location_clause(None) == location_clause(LOCATION_OWN)
 
 
-def test_c3_roots_own_home_says_a_root_installation_must_not_live_there() -> None:
+def as_root(monkeypatch: pytest.MonkeyPatch, home: str) -> None:
+    """The running process is root, whose home in the account database is ``home``
+    (fourth pass, D7: "root's own home" comes from the account database, not HOME)."""
+    monkeypatch.setattr(config_module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(
+        config_module,
+        "_account_home",
+        lambda account, *, by_uid: (0, home) if account == "0" else None,
+    )
+
+
+def test_c3_roots_own_home_says_a_root_installation_must_not_live_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    as_root(monkeypatch, "/root")
     config = Config(paths=PathsConfig(state_dir=Path("/root/pl"), config_dir=Path("/root/pl")))
     posture = detect_posture(config, elevated=True, env={"HOME": "/root"}, platform="linux")
     assert posture.cause == CAUSE_ACCOUNT_HOME
@@ -395,7 +409,9 @@ def test_c3_roots_own_home_says_a_root_installation_must_not_live_there() -> Non
     assert windows.cause == LOCATION_OWN
 
 
-def test_c3_the_command_line_words_each_message_from_the_cause(tmp_path: Path) -> None:
+def test_c3_the_command_line_words_each_message_from_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # An unreadable profile variable: the location cannot be confirmed. Neither the init
     # notice nor recover may claim the files are in this user's own folders.
     unreadable = {"PORTLOCK_HOME": str(tmp_path / "home"), "USERPROFILE": "", "HOME": ""}
@@ -410,6 +426,7 @@ def test_c3_the_command_line_words_each_message_from_the_cause(tmp_path: Path) -
         # root's own home: say that a root installation must not live there. (Under
         # tmp_path, so that a regression could never write anywhere else.)
         root_home = tmp_path / "root-home"
+        as_root(monkeypatch, str(root_home))
         root = {"PORTLOCK_HOME": str(root_home / "pl"), "HOME": str(root_home)}
         code, _out, err = cli(tmp_path, "recover", environ=root, is_elevated=lambda: True)
         assert code == EXIT_FAILED and "a root installation must not live there" in err
@@ -766,8 +783,10 @@ def test_c7_a_stored_default_deny_is_reported_off_with_a_note(
 
 
 def test_c7_an_enforcing_process_reports_what_is_stored(tmp_path: Path) -> None:
+    # In enforce mode a stored "on" is in force (fourth pass, D4: in monitor mode it is
+    # not; see test_watch_only_pass4).
     clock = FakeClock(START)
-    config = make_config(tmp_path / "home")
+    config = make_config(tmp_path / "home", mode=Mode.ENFORCE)
     runtime = build_runtime(
         config,
         clock=clock,

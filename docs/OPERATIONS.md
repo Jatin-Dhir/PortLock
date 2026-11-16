@@ -145,14 +145,24 @@ Directories inside a user's folders are per-user, wherever they come from (the d
 when elevated, because every program that user runs could change them. A user's folders
 are not only the account that runs PortLock:
 
-- **Windows:** the profile (`USERPROFILE`) and the AppData folders, every profile under
-  the profiles folder (the parent of `USERPROFILE`, so another administrator's profile
-  too), and the shared `PUBLIC` folder.
+- **Windows:** the profile (`USERPROFILE`) and the AppData folders, the shared `PUBLIC`
+  folder, and every profile in the folder that holds the users' profiles, so another
+  administrator's profile too. That folder is taken from sources that do not depend on who
+  runs PortLock: `ProfilesDirectory` in the registry (read only), `Users` on
+  `SystemDrive`, the parent of `PUBLIC`, and the parent of `USERPROFILE`. Under the SYSTEM
+  or LocalService account the parent of `USERPROFILE` is not `C:\Users`, which is why
+  the others are asked. If none of them is known, the location counts as not system-wide.
 - **Linux:** the home directory (`HOME`), everything under `/home` and `/Users`, and, when
-  PortLock runs natively through `sudo`, `doas` or `pkexec`, the home of the account that
-  asked for it (`SUDO_USER`, `DOAS_USER`, `PKEXEC_UID`). If one of those is set and its
-  home cannot be found, the location counts as not system-wide. Root's own home (`/root`)
-  is no place for a root installation either: PortLock is watch-only there and says so.
+  PortLock runs natively, the home of every login account in the account database (uid of
+  at least `UID_MIN` from `/etc/login.defs`, 1000 when it says nothing, and a home that is a
+  real directory other than `/`), so `/export/home`, `/var/home` or `/srv/users` count too;
+  under WSL also the Windows profiles under `/mnt/<drive>/Users`. Through `sudo`, `doas` or
+  `pkexec` also the home of the account that asked for it (`SUDO_USER`, `DOAS_USER`,
+  `PKEXEC_UID`). If one of those is set and its home cannot be found, the location counts
+  as not system-wide. Root's own home (`/root`, as the account database gives it, also when
+  `HOME` is unset or `/`) is no place for a root installation either: PortLock is
+  watch-only there and says so. A `HOME` left pointing at another user's home (`su`
+  without `-`) is that user's folder, not root's.
 
 Another spelling of the profile does not get around this: short names
 (`C:\Users\ALICE~1`), `\\?\` prefixes, `..`, junctions, symbolic links and `subst` drives
@@ -161,7 +171,9 @@ computer (AppData redirected to a file server with Folder Redirection, say) is s
 because no local directory can lie inside it, so it no longer makes an administrator's
 system-wide installation watch-only. PortLock still fails closed, and counts the location
 as not system-wide, for a `\\?\` or `\\.\` profile path, a UNC path to this computer
-(`localhost`, `127.x`, `::1` or its own name), a UNC `USERPROFILE` or `LOCALAPPDATA`, a
+(`localhost`, `127.x`, `::1`, its own name, a name with a trailing dot such as
+`127.0.0.1.`, its own IPv4 or IPv6 address, or a DNS name that resolves to one of them or
+to a loopback address), a UNC `USERPROFILE` or `LOCALAPPDATA`, a
 profile variable that is set but empty, relative or cannot be resolved, and a state or
 configuration directory that is itself a UNC or device path.
 
@@ -297,7 +309,13 @@ Run as the service's account, on a machine where the service is not running: for
 system-wide installation that means an administrator window (root on Linux), and `init`
 says in plain words that this installation can block devices. Run on Windows and under WSL
 with a throwaway home. It creates nothing until it has a password it accepts; after three
-refused passwords it says so and that you can run `init` again. Then it:
+refused passwords it says so and that you can run `init` again. Before it writes, it looks
+again at everything it decided on before the prompt (the configuration file, the database
+and its users, whether an administrator was ever created, the key store); if another
+`init` finished or a service started and stopped meanwhile, it changes nothing and asks
+you to run `init` again. A key store that no administrator was set up with (left by a
+`run` before `init`, or by a failed `init` of an older version) is moved aside, never
+deleted, and replaced. Then it:
 
 1. creates the directories (private on Linux; see section 1);
 2. if there is no configuration file, writes `portlock.toml` with `[audit] hmac_key_file`
@@ -394,6 +412,12 @@ unless confirmed within 60 seconds** (`commit_confirm_seconds`, 10 to 600): swit
 enforce mode (`portlock mode enforce`), widening the scope (`portlock scope ...`), turning
 on default-deny (`portlock default-deny on`) and engaging a lockdown. Confirmation must come
 over the same channel: the command line confirms what the command line applied.
+
+Default-deny is a standing setting that is **in force only in enforce mode**. Turned on in
+monitor mode, it is stored and waits: `portlock default-deny` and `GET /default-deny` then
+report `enabled` false and `stored` true with a note that says so, and the console's
+control stays ticked with the same note. The kill switch takes it out of force the same
+way. An engaged lockdown denies new devices by itself, in monitor mode too.
 
 ```
 portlock mode enforce                  # applies, lists what would be blocked, asks "Keep it?"
@@ -625,6 +649,10 @@ Backing up the initial audit key and the recovery codes is separate, and offline
 | "PortLock cannot change this computer" (`watch_only`) when switching to enforce, engaging a lockdown or turning default-deny on | this process is watch-only: not elevated, or its directories are in a user's folders, or their location cannot be confirmed as local and system-wide; the reason says which (sections 0 and 1). Use the system-wide installation from an administrator window |
 | a watch-only `run` refuses to start because an enforcing PortLock may have left changes (open records, a lockdown, or journal lines it cannot read) | system-wide directories: start PortLock as administrator, or run `portlock recover` as administrator, on that installation. Per-user directories: move the folder aside and have an administrator check the computer (section 0) |
 | `init` refuses because a PortLock service is running from that state directory | stop the service (Ctrl+C in its window, or `portlock stop`), run `init`, then start it again |
+| `init` says "PortLock's files changed while init was waiting" | another `init`, or a service that started and stopped, changed the files while it asked for the password; nothing was changed by this one. Run `init` again |
+| `stop` or `status` says it "cannot tell whether the service is running" | this user cannot look into the state directory (another user's or the system-wide installation). Open a window as administrator, or as the user who runs it |
+| `stop` says the service is "probably not running" | the lock cannot be looked at, and the address in `runtime.json` does not answer: the service most likely ended without cleaning up. An administrator (or its user) can confirm with `status` |
+| `default-deny` is off with a note that it is "stored on but not in force" | default-deny applies only in enforce mode, and not under the kill switch; the choice is kept (section 5) |
 | `run` says the port is taken | another program uses it; change `[api] port` in the configuration file it names |
 | a decision says `not enforced` or `unsupported` | the mechanism is unavailable (not root, no such attribute, read-only sysfs) |
 | `cannot be made private` | fix the directory's owner and mode, or the access list, then restart |

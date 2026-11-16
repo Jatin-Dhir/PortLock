@@ -221,6 +221,16 @@ _STORED_DEFAULT_DENY_IGNORED = (
     "A default-deny setting stored by an earlier run is ignored: this process is watch-only "
     "and denies nothing."
 )
+# Said wherever default-deny is reported stored on but not in force in a process that is
+# not watch-only: the choice is kept and applies again once it can.
+_STORED_DEFAULT_DENY_MONITOR = (
+    "Default-deny is stored on but not in force: it applies only in enforce mode, and "
+    "PortLock is in monitor mode now. The choice is kept."
+)
+_STORED_DEFAULT_DENY_KILLSWITCH = (
+    "Default-deny is stored on but not in force: the kill switch is on, so PortLock "
+    "enforces nothing until it is removed."
+)
 
 
 # --- errors and seams --------------------------------------------------------------------
@@ -814,9 +824,10 @@ class SettingsView:
 class DefaultDenyView:
     """``API.md`` 6.12 (``GET /default-deny``): default-deny in force, and as stored.
 
-    ``enabled`` is the value in effect. A watch-only process denies nothing, so it is
-    False there even when an earlier run stored it on; ``stored`` keeps that value and
-    ``note`` says that it is ignored.
+    ``enabled`` is true only while it is in force: stored on, the effective mode is
+    enforce and the kill switch is not latched (never in a watch-only process).
+    ``stored`` keeps the stored choice, and ``note`` says why a stored "on" is not in
+    force (monitor mode, the kill switch, or watch-only).
     """
 
     enabled: bool
@@ -1659,7 +1670,8 @@ class PortLockService:
             "scan.enabled": bool(settings.get("scan.enabled", self._config.scan.enabled)),
             "lockdown.default_minutes": self._default_lockdown_minutes(),
             "scope": self._scope(),
-            # The value in effect: a watch-only process reports the stored "on" as off.
+            # In force (GET /default-deny ``enabled``), not merely stored: a stored "on"
+            # reads as off in monitor mode, under the kill switch and in watch-only.
             "default_deny": default_deny.enabled,
         }
         effective = {
@@ -1669,21 +1681,30 @@ class PortLockService:
             "scope": self._scope(),
             "fail_closed": self._config.fail_closed,
             "baseline_read_only": self._baseline_active,
-            "default_deny": default_deny.enabled,
+            # What the service asks of the operating system right now: also true while a
+            # lockdown is active, which denies new devices whatever is stored.
+            "default_deny": self._want_default_deny(),
         }
         notes = (default_deny.note,) if default_deny.note else ()
         return SettingsView(self._config.to_dict(), runtime, effective, notes)
 
     def get_default_deny(self) -> DefaultDenyView:
-        """Default-deny as it is in force (``GET /default-deny``).
+        """Default-deny as it is in force, and as stored (``GET /default-deny``).
 
-        A watch-only process never denies anything (DESIGN 14.28): a setting an earlier,
-        enforcing run stored is reported as off, with a note that it is ignored.
+        ``enabled`` means in force: stored on, the effective mode is enforce and the kill
+        switch is not latched. A watch-only process is never in enforce mode, so it is
+        never in force there (DESIGN 14.28). When the stored choice is on but not in
+        force, the note says why, so that the choice does not look lost.
         """
         stored = bool(self._settings.get("default_deny", False))
         if self._watch_only():
             return DefaultDenyView(False, stored, _STORED_DEFAULT_DENY_IGNORED if stored else None)
-        return DefaultDenyView(stored, stored)
+        latched = self._killswitch_latched
+        in_force = stored and not latched and self._effective_mode() is Mode.ENFORCE
+        note: str | None = None
+        if stored and not in_force:
+            note = _STORED_DEFAULT_DENY_KILLSWITCH if latched else _STORED_DEFAULT_DENY_MONITOR
+        return DefaultDenyView(in_force, stored, note)
 
     def doctor(self) -> DoctorLike:
         """``portlock doctor``: the guard report with the service checks appended."""

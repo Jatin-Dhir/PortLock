@@ -40,6 +40,7 @@ import pytest
 
 from portlock.core.config import PathsConfig, paths_per_user
 from portlock.core.privilege import process_elevated
+from portlock.service.daemon import EXIT_PORT, RUNTIME_FILE_NAME
 
 pytestmark = [pytest.mark.hardware]
 
@@ -109,9 +110,24 @@ def launch(
 
 
 def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    """A port nothing listens on now. ``PORTLOCK_LIVE_PORTS=LOW-HIGH`` keeps the choice in
+    that range (so that a run beside a real installation never comes near its port);
+    otherwise the operating system picks one."""
+    wanted = os.environ.get("PORTLOCK_LIVE_PORTS", "").strip()
+    if wanted:
+        low, _, high = wanted.partition("-")
+        candidates = list(range(int(low), int(high) + 1))
+        secrets.SystemRandom().shuffle(candidates)
+    else:
+        candidates = [0]
+    for candidate in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            return int(probe.getsockname()[1])
+    pytest.fail(f"no free port in PORTLOCK_LIVE_PORTS={wanted}")
 
 
 def problems_in(report: Path) -> list[str]:
@@ -199,39 +215,15 @@ def live(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Live]:
     _, errors = init.communicate(password + "\n", timeout=180)
     assert init.returncode == 0, f"init failed: {errors[-600:]}"
 
-    port = free_port()
-    config_file = home / "config" / "portlock.toml"
-    text, replaced = re.subn(
-        r"(?m)^port\s*=\s*\d+", f"port = {port}", config_file.read_text(encoding="utf-8")
-    )
-    assert replaced == 1, "the configuration file init wrote has no port line to change"
-    config_file.write_text(text, encoding="utf-8")
-
     run_report = reports / "run.json"
     log = (reports / "run.log").open("w", encoding="utf-8")
-    process = launch(
-        ["run"],
-        environment,
-        run_report,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        # Its own process group, so that the break reaches the service and not the tests.
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    try:
+        process, port = start_service(home, environment, run_report, log=log)
+    except BaseException:
+        log.close()
+        raise
     result = Live(home, port, "", password, process, init_report, run_report, environment)
     try:
-        deadline = time.monotonic() + _START_SECONDS
-        answered = False
-        while time.monotonic() < deadline and process.poll() is None and not answered:
-            with contextlib.suppress(OSError):
-                answered = call(port, "GET", "/ping")[0] == 200
-            if not answered:
-                time.sleep(0.25)
-        if not answered:
-            log.flush()
-            tail = (reports / "run.log").read_text(encoding="utf-8", errors="replace")[-800:]
-            pytest.fail(f"the service did not answer (exit code {process.poll()}): {tail}")
         status, data = call(
             port, "POST", "/auth/login", body={"username": "admin", "password": password}
         )
@@ -375,14 +367,53 @@ def test_a_signal_stops_it_cleanly_and_nothing_was_changed(
     assert problems_in(live.run_report) == []
 
 
-def wait_until_answering(process: subprocess.Popen[str], port: int) -> None:
+def wait_until_up(process: subprocess.Popen[str], port: int, home: Path) -> bool:
+    """Wait until the service answers its ping and has written its runtime file.
+
+    Returns False when it exited because its port was taken (``EXIT_PORT``): another
+    program took the free port between :func:`free_port` and the service binding it.
+    That is no fault of PortLock's, and the caller starts it once more on a new port.
+    """
+    runtime_file = home / "state" / RUNTIME_FILE_NAME
     deadline = time.monotonic() + _START_SECONDS
     while time.monotonic() < deadline and process.poll() is None:
         with contextlib.suppress(OSError):
-            if call(port, "GET", "/ping")[0] == 200:
-                return
+            if call(port, "GET", "/ping")[0] == 200 and runtime_file.exists():
+                return True
         time.sleep(0.25)
+    if process.poll() == EXIT_PORT:
+        return False
     pytest.fail(f"the service did not answer (exit code {process.poll()})")
+
+
+def start_service(
+    home: Path, environment: dict[str, str], report: Path, *, log: Any = None
+) -> tuple[subprocess.Popen[str], int]:
+    """``run`` on a free port, answering and with its runtime file written; once more on a
+    new port if that one was taken meanwhile. ``log`` receives its output (else it is
+    dropped). Its own process group, so that a break reaches it and not the tests."""
+    for _attempt in range(2):
+        port = free_port()
+        use_port(home, port)
+        process = launch(
+            ["run"],
+            environment,
+            report,
+            stdin=subprocess.DEVNULL,
+            stdout=log if log is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        try:
+            up = wait_until_up(process, port, home)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        if up:
+            return process, port
+    pytest.fail("the service found its port taken twice in a row")
 
 
 def report_writes(report: Path) -> int:
@@ -411,12 +442,12 @@ def wait_for_a_report_after_now(process: subprocess.Popen[str], report: Path) ->
     pytest.fail(f"the flight recorder wrote no report (exit code {process.poll()})")
 
 
-def use_port(live: Live, port: int) -> None:
-    config_file = live.home / "config" / "portlock.toml"
+def use_port(home: Path, port: int) -> None:
+    config_file = home / "config" / "portlock.toml"
     text, replaced = re.subn(
         r"(?m)^port\s*=\s*\d+", f"port = {port}", config_file.read_text(encoding="utf-8")
     )
-    assert replaced == 1
+    assert replaced == 1, "the configuration file init wrote has no port line to change"
     config_file.write_text(text, encoding="utf-8")
 
 
@@ -427,20 +458,10 @@ def test_a_killed_service_leaves_nothing_that_blocks_the_next_start(
     runtime_file = live.home / "state" / "runtime.json"
     reports = tmp_path
 
-    # A service that is killed (the window closed) leaves its runtime file behind.
-    port = free_port()
-    use_port(live, port)
-    killed = launch(
-        ["run"],
-        live.environment,
-        reports / "killed.json",
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    # A service that is killed (the window closed) leaves its runtime file behind. It is
+    # killed only once it answers and has written that file.
+    killed, _port = start_service(live.home, live.environment, reports / "killed.json")
     try:
-        wait_until_answering(killed, port)
         wait_for_a_report_after_now(killed, reports / "killed.json")
     finally:
         killed.kill()
@@ -459,23 +480,16 @@ def test_a_killed_service_leaves_nothing_that_blocks_the_next_start(
     )
     _out, err = stopper.communicate(timeout=60)
     elapsed = time.monotonic() - began
+    # "At once" is what it says, not how long a whole new process (interpreter, flight
+    # recorder, imports) takes on a busy machine: a stop that waited for the service
+    # ends with "did not stop within" and another exit code.
     assert stopper.returncode == 4, err[-400:]
     assert "the service is not running" in err
-    assert elapsed < 10.0, f"stop took {elapsed:.1f} s"
+    assert "did not stop within" not in err
     assert not runtime_file.exists()
 
     # The next start keeps running: no stale stop request ends it at its first tick.
-    port = free_port()
-    use_port(live, port)
-    again = launch(
-        ["run"],
-        live.environment,
-        reports / "again.json",
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    again, port = start_service(live.home, live.environment, reports / "again.json")
     second = Live(
         live.home,
         port,
@@ -487,7 +501,6 @@ def test_a_killed_service_leaves_nothing_that_blocks_the_next_start(
         live.environment,
     )
     try:
-        wait_until_answering(again, port)
         time.sleep(3.0)  # several ticks of the real service, which reads stop.request
         assert again.poll() is None, "the second start ended by itself"
         assert call(port, "GET", "/ping")[0] == 200

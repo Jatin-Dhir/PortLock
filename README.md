@@ -57,8 +57,10 @@ Demonstrated:
   it found zero devices, and nothing about Linux device handling was shown on real
   devices.
 - The CI workflow (`.github/workflows/ci.yml`) runs the linter and the full test suite on
-  Linux and Windows runners for Python 3.11 to 3.14. It reads the repository and changes
-  nothing on the runner beyond installing the package.
+  Linux and Windows runners for Python 3.11 to 3.14, and the read-only live tests
+  (the real service, watch-only, under the flight recorder) on one Linux and one Windows
+  runner. It reads the repository and changes nothing on the runner beyond installing
+  the package.
 - `portlock init`, `run`, `status`, `stop`, `recover --dry-run` and the offline audit
   verification were run by hand, unprivileged, against a temporary directory under WSL.
   `init`, offline verification and `simulate` were run on Windows.
@@ -134,12 +136,17 @@ hand, for example "its files are in another user's folders".
 Three cases that come up in practice:
 
 - **Another account's folder counts too.** An administrator window opened with another
-  person's credentials, or `sudo PORTLOCK_HOME=/home/alice/pl portlock run`, is watch-only:
-  on Windows every profile under the profiles folder and the shared `PUBLIC` folder count
-  as per-user; on Linux everything under `/home` and `/Users`, and the home of the account
-  that ran `sudo`, `doas` or `pkexec`.
-- **A root installation must not live in root's own home** (`/root`): PortLock refuses to
-  enforce from there and says so.
+  person's credentials, `sudo PORTLOCK_HOME=/home/alice/pl portlock run`, or PortLock
+  running as the SYSTEM account, is watch-only there: on Windows every profile in the
+  folder that holds the users' profiles (found from the registry, `SystemDrive` and
+  `PUBLIC`, whoever runs PortLock) and the shared `PUBLIC` folder count as per-user; on
+  Linux everything under `/home` and `/Users`, the home of every login account in the
+  account database (also `/export/home` or `/var/home`), the Windows profiles under
+  `/mnt/<drive>/Users` in WSL, and the home of the account that ran `sudo`, `doas` or
+  `pkexec`.
+- **A root installation must not live in root's own home** (`/root`, as the account
+  database gives it, even when `HOME` is unset): PortLock refuses to enforce from there and
+  says so.
 - **A redirected AppData does not get in the way.** On a PC whose AppData is redirected to
   a file server (Folder Redirection), an administrator's system-wide installation is not
   made watch-only by it.
@@ -187,7 +194,10 @@ open its "Why" to read the reason.
 **Run `init` before `run`, not beside it.** `init` refuses, before it creates anything,
 while a PortLock service is running on the same folder, and says to stop that service
 first. If you started `run` before any administrator existed, it tells you what to do:
-stop it (Ctrl+C), run `init`, then start it again.
+stop it (Ctrl+C), run `init`, then start it again. `init` also looks again, once you have
+typed the password, at everything it decided on; if another `init` or a service changed
+PortLock's files in the meantime, it changes nothing and says "PortLock's files changed
+while init was waiting", and you run `init` again.
 
 **To stop PortLock**, press Ctrl+C in that window, or run `python -m portlock stop` in
 another ordinary PowerShell window opened in the same `src` folder. Closing the window is

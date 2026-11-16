@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import dataclasses
 import getpass
+import hashlib
 import hmac
 import http.client
 import ipaddress
@@ -124,6 +125,25 @@ _MAX_RESPONSE = 32 * 1024 * 1024
 _STOP_WAIT_SECONDS = 15.0
 _RECOVER_WAIT_SECONDS = 10.0
 _LOOPBACK_NAMES = frozenset({"localhost"})
+
+
+@dataclass(frozen=True, slots=True)
+class _InitSnapshot:
+    """Everything ``init`` decides on, taken before the password prompt and again once the
+    instance lock is held. Any difference means another ``init`` or a service ran on these
+    files meanwhile, and nothing may be written on the strength of the first look.
+
+    ``key_file`` is ``None`` when there is no key store, else its identity (device, file
+    number, size, modification time and a digest of its bytes); the key itself is never
+    kept or shown.
+    """
+
+    config_file: bytes | None
+    database: bool
+    has_users: bool
+    administrator_ever_created: bool
+    audit_head: int
+    key_file: tuple[int, int, int, int, str] | None
 
 
 # --- the environment the command line reaches outside itself ----------------------------
@@ -691,6 +711,10 @@ class _Cli:
         instance lock at the start and again just before it writes (holding the lock
         while it writes), but never holds it while it waits for a password, so a service
         started meanwhile is not told "already running".
+
+        What it decides on (the configuration file, the database, its users, the key
+        store) is looked at before the prompt and again once the lock is held; if another
+        ``init`` or a service changed any of it meanwhile, ``init`` changes nothing.
         """
         config = self.config(args)
         prog = self.env.program
@@ -701,29 +725,24 @@ class _Cli:
         key_path = config.audit.hmac_key_file
         target = Path(args.config) if args.config else Path(config.paths.config_file)
         self._refuse_beside_service(state_dir)
-        administrator_ever_created = False
-        if Path(config.paths.database_file).exists():
-            existing = self._open_local(config)
-            try:
-                set_up = existing.accounts.has_users()
-                administrator_ever_created = bool(
-                    existing.audit_log.query(event_types=[ev.AUTH_USER_CREATED], limit=1)
-                )
-            finally:
-                existing.db.close()
-            if set_up:
-                raise _Failure(
-                    EXIT_FAILED,
-                    "PortLock is already set up; init only creates the first administrator "
-                    f"(use '{prog} user reset-password NAME --local' for a lost password)",
-                )
-        # A key store whose initial key was never shown (a failed init of an older
+        before = self._init_snapshot(config, target)
+        if before.has_users:
+            raise _Failure(
+                EXIT_FAILED,
+                "PortLock is already set up; init only creates the first administrator "
+                f"(use '{prog} user reset-password NAME --local' for a lost password)",
+            )
+        # A key store that no administrator was set up with (a failed init of an older
         # PortLock, or `run` before `init`: no administrator was ever created) is set
         # aside, never deleted, and a new one is made whose key is shown below. Once an
         # administrator was created, its key was shown at that init: the key store is
-        # kept (as in commit d781c2a), even if the users table is empty now.
+        # kept (as in commit d781c2a), even if the users table is empty now. A service
+        # that ran before init may have shown its own initial key at a terminal, but no
+        # administrator holds it, so the replacement is still the key to keep.
         stale_key = (
-            key_path is not None and Path(key_path).exists() and not administrator_ever_created
+            key_path is not None
+            and before.key_file is not None
+            and not before.administrator_ever_created
         )
         name = (
             args.username
@@ -747,6 +766,14 @@ class _Cli:
         if not acquired:
             raise _Failure(EXIT_FAILED, self._service_running_message(state_dir))
         try:
+            # Another init that finished, or a service that came and went, while this one
+            # waited for the password: what was decided above no longer holds.
+            if self._init_snapshot(config, target) != before:
+                raise _Failure(
+                    EXIT_FAILED,
+                    "PortLock's files changed while init was waiting. Nothing was changed; "
+                    f"run '{prog} init' again.",
+                )
             notes: list[str] = []
             replaced: Path | None = None
             if key_path is None:
@@ -767,7 +794,9 @@ class _Cli:
                 aside = _aside(Path(key_path), self.env.clock)
                 os.replace(key_path, aside)
                 replaced = aside
-                notes.append(f"an audit key store whose key was never shown was moved to {aside}")
+                notes.append(
+                    f"an audit key store that no administrator was set up with was moved to {aside}"
+                )
             local = self._open_local(
                 config, initial=Path(key_path) if key_path else None, create=True
             )
@@ -781,7 +810,7 @@ class _Cli:
                             "key": "audit.key_store",
                             "old": str(replaced),
                             "new": str(key_path),
-                            "reason": "its initial key was never shown",
+                            "reason": "no administrator was set up with it",
                         },
                     )
                 user = local.accounts.create_user(name, password, Role.ADMIN, actor="local-console")
@@ -823,6 +852,56 @@ class _Cli:
             self.say(f"  {prog} enroll CONNECTION_ID   protect your own keyboard and mouse")
             self.say(f"  {prog} service print-unit     a hardened service definition to review")
         return EXIT_OK
+
+    def _init_snapshot(self, config: Config, target: Path) -> _InitSnapshot:
+        """What ``init`` decides on, as it is now (see :class:`_InitSnapshot`)."""
+        try:
+            config_bytes: bytes | None = target.read_bytes()
+        except FileNotFoundError:
+            config_bytes = None
+        except OSError as exc:
+            raise _Failure(
+                EXIT_FAILED,
+                f"{target} cannot be read ({exc.strerror or type(exc).__name__}). "
+                "Nothing was changed.",
+            ) from None
+        database = Path(config.paths.database_file).exists()
+        has_users = administrator_ever_created = False
+        audit_head = 0
+        if database:
+            existing = self._open_local(config)
+            try:
+                has_users = bool(existing.accounts.has_users())
+                administrator_ever_created = bool(
+                    existing.audit_log.query(event_types=[ev.AUTH_USER_CREATED], limit=1)
+                )
+                audit_head = existing.audit_log.head()[0]
+            finally:
+                existing.db.close()
+        key_file: tuple[int, int, int, int, str] | None = None
+        key_path = config.audit.hmac_key_file
+        if key_path is not None:
+            try:
+                info = os.stat(key_path)
+                digest = hashlib.sha256(Path(key_path).read_bytes()).hexdigest()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise _Failure(
+                    EXIT_FAILED,
+                    f"{key_path} cannot be read ({exc.strerror or type(exc).__name__}). "
+                    "Nothing was changed.",
+                ) from None
+            else:
+                key_file = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, digest)
+        return _InitSnapshot(
+            config_file=config_bytes,
+            database=database,
+            has_users=has_users,
+            administrator_ever_created=administrator_ever_created,
+            audit_head=audit_head,
+            key_file=key_file,
+        )
 
     def _posture(self, config: Config) -> Posture:
         """The watch-only posture of a service started with ``config`` by this user."""
@@ -893,12 +972,18 @@ class _Cli:
         """Whether a service holds this state directory's instance lock right now.
 
         Returns ``(True, "")`` held, ``(False, "")`` free, or ``(None, why)`` when this
-        user cannot tell: the lock file cannot be opened for writing (another user's or
-        an administrator's installation).
+        user cannot tell: the lock file cannot be looked at or opened for writing
+        (another user's or an administrator's installation).
+
+        Only a lock file that provably does not exist means "free". ``Path.is_file`` is
+        not used: from Python 3.13 on it answers False, instead of raising, when the
+        directory cannot be searched, which would call a running service "not running".
         """
         lock_path = state_dir / LOCK_FILE_NAME
         try:
-            if not lock_path.is_file():
+            try:
+                lock_path.stat()
+            except (FileNotFoundError, NotADirectoryError):
                 return False, ""
             probe = InstanceLock(lock_path)
             if probe.acquire():
@@ -1043,8 +1128,17 @@ class _Cli:
         if held is None:
             # The lock cannot be probed: only a runtime file whose service proves itself
             # over the network says one is running.
-            if not self._answers(args, config):
+            runtime = read_runtime_file(state_dir)
+            if runtime is None:
                 raise self._cannot_tell(state_dir, why)
+            if not self._answers(args, config):
+                raise _Failure(
+                    EXIT_UNREACHABLE,
+                    f"the service is probably not running: its {RUNTIME_FILE_NAME} names "
+                    f"one at {runtime['host']}:{runtime['port']}, which does not answer as "
+                    f"this installation's PortLock. This cannot be certain, because {why}. "
+                    "Nothing was changed.",
+                )
         elif not held:
             # Nobody holds the instance lock: a runtime file is what a killed service left.
             with contextlib.suppress(OSError):
@@ -1942,7 +2036,8 @@ class _Cli:
 
         def show(data: Any) -> None:
             self.say(f"default-deny is {'on' if data['enabled'] else 'off'}")
-            # A watch-only process says that a stored "on" is ignored.
+            # "on" means in force; a stored "on" that is not (monitor mode, the kill
+            # switch, watch-only) comes with a note that says why.
             if data.get("note"):
                 self.say(f"  {_text(data['note'])}")
 

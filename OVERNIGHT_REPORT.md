@@ -4,7 +4,7 @@ Branch `claude/overnight-security-framework`, 16 November 2026. `main` is untouc
 
 The short version: the repository held about 180 lines of Python that could not be
 imported. It now holds a complete device-control service (decision pipeline, enforcers
-for Linux and Windows, lockdown, audit, API, CLI, web console) that passes 6,013 tests.
+for Linux and Windows, lockdown, audit, API, CLI, web console) that passes 6,139 tests.
 **No enforcement mechanism has been run against a real device.** Everything that would
 change the operating system has only ever run against fakes.
 
@@ -120,8 +120,8 @@ change the operating system has only ever run against fakes.
 
 Run by the orchestrator on this machine, not just reported by the agents that wrote the code:
 
-- Windows 11, Python 3.12: **6,013 passed, 80 skipped**, 8 min 10 s (run beside other work).
-- Linux (WSL 2, Python 3.14): **5,995 passed, 99 skipped**, 5 min 12 s.
+- Windows 11, Python 3.12: **6,139 passed, 92 skipped**, 8 min 12 s (run beside other work).
+- Linux (WSL 2, Python 3.14): **6,126 passed, 106 skipped**, 4 min 56 s.
 - `ruff check` and `ruff format --check`: clean.
 - The opt-in live tests (`--run-hardware`; they read the real machine and change nothing):
   the 9 watch-only service tests pass on Windows and under WSL, beside the 8 Windows and
@@ -135,9 +135,12 @@ Integration tests cover each area asked for: detection, authorization, trusted d
 unauthorized devices, permission enforcement, removal, reconnection, policy expiration,
 service restart, security event logging, lockdown safeguards.
 
-On GitHub Actions, the last code change (`c1c3404`) passed lint and the full suite on
-Linux and Windows across Python 3.11 to 3.14: nine jobs, all green. The run before it
-had failed one test on Linux with Python 3.14; see section 5.
+On GitHub Actions, commit `36012b4` (the third watch-only pass) passed everything: lint,
+the full suite on Linux and Windows across Python 3.11 to 3.14, and the read-only live
+tests on a Linux and a Windows runner: eleven jobs, all green. For the commit before it
+the Linux live-test job had failed: the test's flight recorder wrote its first report
+after one second, and a fast runner had answered and been killed by then (a fault of
+the test, fixed in `36012b4`). The fourth pass was pushed after that run.
 
 ## 7. Build and runtime verification
 
@@ -155,7 +158,7 @@ had failed one test on Linux with Python 3.14; see section 5.
   (2 hubs, 1 mouse, 1 audio/video, 1 wireless; all 5 protected), answered on the event
   stream and verified its audit chain. Asked for enforce mode, a lockdown and default-deny
   it refused all three (`watch_only`); a console break stopped it with exit code 0. The
-  recorder saw no program start, no registry access, no mutating seam call, no file
+  recorder saw no program start, no registry write, no mutating seam call, no file
   written outside the throwaway directory and no socket other than `127.0.0.1`.
 - Run against the code as it was before (commit `d781c2a`), the same recorder caught
   start-up calling `icacls` to change directory permissions, and a console request
@@ -173,8 +176,8 @@ had failed one test on Linux with Python 3.14; see section 5.
 
 ## 8. Git commits created
 
-18 code commits, from `35777d0` (retire the prototype) to `c1c3404` (the audit race fix),
-plus the commits that add and correct this report. `git log main..claude/overnight-security-framework`
+26 commits in all, from `35777d0` (retire the prototype) to the fourth watch-only pass,
+including the commits that add and correct this report. `git log main..claude/overnight-security-framework`
 lists them; each is one logical unit.
 
 ## 9. Changes pushed

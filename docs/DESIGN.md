@@ -386,17 +386,32 @@ these conflict with anything above, these win.
       `%ProgramData%\PortLock` or `/var/lib/portlock` and `/etc/portlock`. A directory
       counts as system-wide only if it is provably outside every user's profile
       (`core.config.per_user_cause`): this user's own (`USERPROFILE`, `LOCALAPPDATA`,
-      `APPDATA`; `HOME`), another user's (on Windows everything under the profiles root,
-      the parent of `USERPROFILE`; on POSIX `/home`, `/Users` and, on the running system,
-      the home of the account that started `sudo`, `doas` or `pkexec`), and the folder all
-      users share (`PUBLIC`). So `sudo PORTLOCK_HOME=/home/alice/pl portlock run`, or an
-      elevated window opened with another administrator's credentials, is watch-only. On
+      `APPDATA`; `HOME`; on the running POSIX system also the home the account database
+      gives the effective user, so `/root` counts when `HOME` is unset or `/`), another
+      user's, and the folder all users share (`PUBLIC`). Another user's means: on Windows
+      everything in the folder that holds the users' profiles, taken from sources that do
+      not depend on who runs PortLock (`ProfilesDirectory` in the registry, read only, on
+      Windows itself; `Users` on `SystemDrive`; the parent of `PUBLIC` unless it is a UNC
+      path; and the parent of `USERPROFILE`, which under SYSTEM or LocalService is not that
+      folder), failing closed when none of them is known; on POSIX `/home`, `/Users` and,
+      on the running system, the home of every login account in the account database
+      (uid at least `UID_MIN` from `/etc/login.defs`, default 1000, home a real directory
+      other than `/`), under WSL `/mnt/<drive>/Users`, and the home of the account that
+      started `sudo`, `doas` or `pkexec`. Other accounts' homes are compared before
+      `HOME`, so a `HOME` left pointing at another user's home is that user's. So
+      `sudo PORTLOCK_HOME=/home/alice/pl portlock run`, an elevated window opened with
+      another administrator's credentials, or PortLock run as SYSTEM with a home in a
+      user's profile, is watch-only. On
       the running system both sides are resolved (8.3 names, `..`, junctions, symbolic
       links, `subst` drives). It fails closed: a UNC or device-namespace candidate; a
       profile variable that is set but empty, relative or unresolvable; a UNC
       `USERPROFILE` or `LOCALAPPDATA`; a device-namespace profile variable; a profile
       variable that is a UNC path to this computer (`localhost`, `127.x`, `::1`, its own
-      name); a `SUDO_USER`, `DOAS_USER` or `PKEXEC_UID` whose home cannot be found. An
+      name, any of these with a trailing dot, and, on the running system, any name that
+      resolves (IPv4 or IPv6) to a loopback address or one of this computer's own
+      addresses, its own IPv6 address and DNS aliases included); a `SUDO_USER`,
+      `DOAS_USER` or `PKEXEC_UID` whose home cannot be found. A server name that does not
+      resolve is taken for another computer that cannot be reached now. An
       `APPDATA` or `PUBLIC` redirected to *another* computer (Folder Redirection on a
       domain PC) is skipped instead: no local directory can lie inside it, and failing
       closed there made every administrator's system-wide installation watch-only.
@@ -404,8 +419,10 @@ these conflict with anything above, these win.
       the location is worded from it (the refusal, the `init` and `run` notices,
       `recover`'s refusal, the leftovers message, the doctor): this user's own folders;
       another user's folders; the folder all users share; the home folder of the account
-      that runs it (root's `/root`, where a root installation must not live); or a
-      location PortLock cannot confirm is local and system-wide.
+      that runs it (root's `/root`, where a root installation must not live: said only
+      when the location is in the home the account database gives the effective user,
+      never on the strength of `HOME`); or a location PortLock cannot confirm is local
+      and system-wide.
     - *What it gets.* The composition root gives a watch-only service inert stand-ins for
       the enforcer, the dead-man timer and the directory-privacy seam; the real objects
       are never built, so no command (`icacls`, `schtasks`, `systemd-run`), registry
@@ -418,8 +435,16 @@ these conflict with anything above, these win.
       record or setting behind. A lockdown is therefore never reported active unless it
       blocks. Decisions are audited as "would apply"; `ModeInfo` carries `watch_only` and
       `watch_only_reason`, and `can_enforce` is false. A default-deny setting an earlier,
-      enforcing run stored is reported as off (`GET /default-deny`, the settings, the
-      command line), with a note that the stored value is ignored.
+      enforcing run stored is reported as not in force (`GET /default-deny`, the settings,
+      the command line), with a note that the stored value is ignored.
+    - *Default-deny in force, and stored.* In every process `GET /default-deny`'s
+      `enabled` (and `runtime.default_deny` in the settings and the `settings.changed`
+      event) means in force: stored on, the effective mode is enforce, and the kill switch
+      is not latched. `stored` keeps the stored choice, and a note says why a stored "on"
+      is not in force (monitor mode, the kill switch, watch-only); the console's control
+      shows the stored choice with that note, so the choice does not look lost.
+      `effective.default_deny` is what the service asks of the operating system right
+      now (`_want_default_deny`), which an active lockdown also turns on.
     - *What it never does.* A stand-in's result is never *performed*
       (`EnforcementResult.performed`): no journal record is closed, and PortLock never
       forgets that it holds a device back, on a dry-run or watch-only result, in the
@@ -439,11 +464,26 @@ these conflict with anything above, these win.
       audit records without the key `init` creates, and offline verification with the key
       `init` showed would fail for good. It looks at the start and again just before it
       writes, holding the lock only while it writes, never while it waits for a password.
+      Everything it decides on (the configuration file's bytes or absence, whether the
+      database exists, whether it has users, any `auth.user_created` record, the audit
+      head, whether the key file exists and its identity) is taken as one snapshot before
+      the prompt and again once the lock is held; if they differ (another `init`
+      finished, or a service came and went), it releases the lock, changes nothing and
+      says "PortLock's files changed while init was waiting".
       A service without an administrator says: stop it (Ctrl+C), run `init`, start it
       again. `init` sets an existing audit key store aside (and audits the replacement)
-      only when its key can never have been shown: the database is missing, or it holds no
-      record that an administrator was ever created (`auth.user_created`). Otherwise the
-      key store is kept, as before watch-only existed.
+      only when no administrator was set up with it: the database is missing, or it holds
+      no record that an administrator was ever created (`auth.user_created`). (A service
+      that ran first at a terminal may have shown its initial key, so `init` says "that no
+      administrator was set up with", not "never shown".) Otherwise the key store is
+      kept, as before watch-only existed.
+    - *Asking whether a service runs.* `stop`, `status` and `init` treat the instance lock
+      as free only when its file provably does not exist (`FileNotFoundError`,
+      `NotADirectoryError` from `stat`); any other error means "cannot tell" (from Python
+      3.13 `Path.is_file` answers False instead of raising for a directory that cannot be
+      searched, which would call a running service "not running"). When the lock cannot be
+      looked at and the runtime file names a service that does not answer, `stop` says it
+      is probably not running.
     - *Every other process* (elevated, system-wide directories) is never called
       watch-only and behaves as before this item: the real objects are built at start,
       the directories are made private at every start (14.18), the kill switch is
