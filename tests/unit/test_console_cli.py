@@ -4,6 +4,7 @@ end in ``tests/integration/test_cli_*.py``."""
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import re
@@ -81,6 +82,10 @@ def run(
     # reach the real default directories.
     variables = {"PORTLOCK_HOME": str(home if home is not None else NOWHERE)} if nowhere else {}
     variables.update(environ or {})
+    # The same answers on every machine, whoever runs the suite: an administrator who
+    # started the installed ``portlock`` command. Per-user runs are tested separately.
+    env.setdefault("is_elevated", lambda: True)
+    env.setdefault("program", "portlock")
     environment = CliEnv(
         environ=variables,
         stdin=io.StringIO(stdin),
@@ -704,6 +709,17 @@ def write_runtime(state: Path) -> Path:
     return path
 
 
+@contextlib.contextmanager
+def service_lock(state: Path) -> Iterator[None]:
+    """Hold the instance lock the way a running service does."""
+    lock = InstanceLock(state / LOCK_FILE_NAME)
+    assert lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def test_stop_asks_politely_and_waits_for_the_service_to_go(tmp_path: Path) -> None:
     assert run(tmp_path, "stop").code == EXIT_UNREACHABLE
     runtime = write_runtime(tmp_path / "state")
@@ -714,7 +730,8 @@ def test_stop_asks_politely_and_waits_for_the_service_to_go(tmp_path: Path) -> N
         if len(ticks) == 3:
             runtime.unlink()  # the service shut down
 
-    result = run(tmp_path, "stop", sleep=sleep)
+    with service_lock(tmp_path / "state"):
+        result = run(tmp_path, "stop", sleep=sleep)
     assert result.code == EXIT_OK and "The service stopped." in result.out
     assert (tmp_path / "state" / STOP_REQUEST_NAME).read_bytes() == b"stop\n"
     assert len(ticks) == 3
@@ -727,9 +744,27 @@ def test_stop_gives_up_after_fifteen_seconds(tmp_path: Path) -> None:
     def sleep(seconds: float) -> None:
         clock[0] += seconds
 
-    result = run(tmp_path, "stop", sleep=sleep, monotonic=lambda: clock[0])
+    with service_lock(tmp_path / "state"):
+        result = run(tmp_path, "stop", sleep=sleep, monotonic=lambda: clock[0])
     assert result.code == EXIT_FAILED and "did not stop within 15 seconds" in result.err
     assert 15.0 <= clock[0] < 16.0
+
+
+def test_stop_after_a_killed_service_says_not_running_at_once(tmp_path: Path) -> None:
+    # A killed service leaves runtime.json behind, but nobody holds the instance lock.
+    runtime = write_runtime(tmp_path / "state")
+    (tmp_path / "state" / LOCK_FILE_NAME).write_bytes(b"")
+
+    def sleep(seconds: float) -> None:
+        raise AssertionError("stop waited for a service that is not there")
+
+    result = run(tmp_path, "stop", sleep=sleep)
+    assert result.code == EXIT_UNREACHABLE and "the service is not running" in result.err
+    assert not runtime.exists()
+    assert not (tmp_path / "state" / STOP_REQUEST_NAME).exists()
+    status = run(tmp_path, "status")
+    assert status.code == EXIT_UNREACHABLE and "not running" in status.err
+    assert "Error" not in status.err
 
 
 def test_run_hands_the_configuration_and_the_api_to_the_daemon(tmp_path: Path) -> None:
@@ -801,7 +836,7 @@ def test_doctor_checks_this_machine_directly_when_there_is_no_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        cli_module.factory, "doctor", lambda config, clock: FakeReport("ok", "warn", "info")
+        cli_module.factory, "doctor", lambda config, clock, **_: FakeReport("ok", "warn", "info")
     )
     result = run(tmp_path, "doctor", "--offline")
     assert (
@@ -813,7 +848,7 @@ def test_doctor_checks_this_machine_directly_when_there_is_no_service(
     fallback = run(tmp_path, "doctor")
     assert fallback.code == EXIT_OK and "checking this machine directly" in fallback.err
     monkeypatch.setattr(
-        cli_module.factory, "doctor", lambda config, clock: FakeReport("ok", "fail")
+        cli_module.factory, "doctor", lambda config, clock, **_: FakeReport("ok", "fail")
     )
     assert run(tmp_path, "doctor", "--offline").code == EXIT_CHECK
     as_json = run(tmp_path, "doctor", "--offline", "--json")

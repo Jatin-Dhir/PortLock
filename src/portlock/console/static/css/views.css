@@ -12,8 +12,9 @@
   transition: border-color var(--t-med) var(--ease), background var(--t-med) var(--ease);
 }
 
-/* Monitor is outlined with a dashed line: it binds nothing. */
-.posture[data-state="monitor"] {
+/* Monitor and watch-only are outlined with a dashed line: they bind nothing. */
+.posture[data-state="monitor"],
+.posture[data-state="watch_only"] {
   --p: var(--watch);
   border-style: dashed;
 }
@@ -36,6 +37,11 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--s2);
   max-width: 34rem;
+}
+
+/* Watch-only draws one rung: it sizes to its word instead of a third of the ladder. */
+.ladder:has(> li:only-child) {
+  grid-template-columns: max-content;
 }
 
 .ladder li {

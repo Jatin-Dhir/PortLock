@@ -165,6 +165,36 @@ code,
   border-radius: 2px;
 }
 
+/* Watch-only: the real PortLock, which changes nothing. Quiet blue with a dashed edge, the
+   console's mark for "intended only", so it never reads as the simulation's hazard stripes. */
+.wobar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s3);
+  padding: var(--s2) var(--s4);
+  border-bottom: 1.5px dashed var(--watch);
+  background: color-mix(in srgb, var(--watch) 12%, var(--surface));
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.wobar strong {
+  color: var(--watch);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.wobar span {
+  max-width: 90ch;
+}
+
+.wobar .why {
+  color: var(--text-2);
+}
+
 .topbar {
   display: flex;
   align-items: center;

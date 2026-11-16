@@ -1470,6 +1470,7 @@ _SERVICE_STATUS = {
     "killswitch_active": 409,
     "enforcement_unavailable": 409,
     "not_private": 409,
+    "watch_only": 409,
     "no_mounted_volume": 409,
     "scan_unavailable": 409,
     "scan_queue_full": 409,

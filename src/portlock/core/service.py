@@ -207,6 +207,14 @@ _VERDICT_RANK = {
 }
 _NOT_ENFORCED = frozenset({Outcome.FAILED, Outcome.UNSUPPORTED, Outcome.REFUSED})
 _RELEASES = frozenset({Action.UNBLOCK, Action.READ_WRITE, Action.RESTORE})
+# Pending changes that would make PortLock block something: refused in watch-only.
+_ENFORCING_CHANGES = frozenset({CHANGE_ENFORCE_MODE, CHANGE_DEFAULT_DENY, CHANGE_LOCKDOWN})
+# Said in the status and the doctor of a watch-only process (``service.daemon`` builds its
+# scanner without the antivirus engines, which would start programs).
+_NO_ANTIVIRUS_NOTE = (
+    "antivirus engines are not used in watch-only: ClamAV and Microsoft Defender would "
+    "start programs, so files are checked only by PortLock's own heuristics and hash lists"
+)
 
 
 # --- errors and seams --------------------------------------------------------------------
@@ -745,7 +753,12 @@ class PolicyTest:
 
 @dataclass(frozen=True, slots=True)
 class ModeInfo:
-    """``API.md`` 4.13: the chosen and the effective mode."""
+    """``API.md`` 4.13: the chosen and the effective mode.
+
+    ``watch_only`` is True for a process that can never be trusted to enforce (DESIGN
+    14.28); ``watch_only_reason`` then says why in one or two plain sentences, and is
+    ``None`` otherwise. ``can_enforce`` is always False in a watch-only process.
+    """
 
     mode: Mode
     effective_mode: Mode
@@ -753,6 +766,8 @@ class ModeInfo:
     killswitch: bool
     can_enforce: bool
     notes: tuple[str, ...] = ()
+    watch_only: bool = False
+    watch_only_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -762,6 +777,8 @@ class ModeInfo:
             "killswitch": self.killswitch,
             "can_enforce": self.can_enforce,
             "notes": list(self.notes),
+            "watch_only": self.watch_only,
+            "watch_only_reason": self.watch_only_reason,
         }
 
 
@@ -1057,6 +1074,11 @@ class PortLockService:
         has_users: True once an administrator account exists.
         simulation: reported in the status (``portlock simulate``).
         platform: a ``sys.platform`` value, for the status.
+        watch_only_reason: set (to the plain reason) when this process is watch-only
+            (DESIGN 14.28, ``guard.watchonly``): ``enforcer``, ``timer`` and
+            ``dir_privacy`` are then inert stand-ins for the whole run. The service stays
+            in monitor mode, neither checks nor changes directory permissions, and refuses
+            enforce mode, a lockdown and default-deny with this reason (``watch_only``).
 
     The constructor reads the lockdown row and nothing else; everything else happens in
     :meth:`start`.
@@ -1085,8 +1107,14 @@ class PortLockService:
         has_users: Callable[[], bool] | None = None,
         simulation: bool = False,
         platform: str | None = None,
+        watch_only_reason: str | None = None,
     ) -> None:
+        if watch_only_reason is not None and (
+            not isinstance(watch_only_reason, str) or not watch_only_reason.strip()
+        ):
+            raise ValueError("watch_only_reason must be a non-empty sentence or None")
         self._config = config
+        self._watch_only_reason = watch_only_reason
         self._clock = clock
         self._store = store
         self._journal = journal
@@ -1972,11 +2000,15 @@ class PortLockService:
     ) -> Applied[EngageResult]:
         """Engage lockdown under commit-confirm (DESIGN 11, 14.15). Acts in monitor mode too.
 
+        A watch-only process refuses (DESIGN 14.28): a lockdown that blocks nothing must
+        never be reported as active, so it stays ``idle`` and nothing is recorded.
+
         Raises:
-            ServiceError: ``killswitch_active``, ``enforcement_unavailable``.
+            ServiceError: ``watch_only``, ``killswitch_active``, ``enforcement_unavailable``.
             LockdownError, ConfirmationError: from the lockdown manager.
         """
         with self._lock:
+            self._refuse_if_watch_only()
             if self._kill_switch.is_set() or self._killswitch_latched:
                 raise ServiceError(
                     "the kill switch is set; enforcement is disabled", code="killswitch_active"
@@ -1997,6 +2029,7 @@ class PortLockService:
     def lockdown_confirm(self, change_id: str, *, actor: str, channel: str) -> LockdownStatus:
         """Confirm an engaged lockdown over the channel that engaged it."""
         with self._lock:
+            self._refuse_if_watch_only()
             status = self._lockdown.confirm(change_id, actor=actor, channel=channel)
             self._refresh_status()
             return status
@@ -2022,13 +2055,18 @@ class PortLockService:
         Returns the mode as now in force; ``extra["change"]`` holds the pending change
         that must be confirmed within ``Config.commit_confirm_seconds``.
 
+        A watch-only process (DESIGN 14.28) refuses enforce mode with the reason (not
+        elevated, or directories that are not system-wide); monitor stays allowed.
+
         Raises:
-            ServiceError: ``killswitch_active``, ``enforcement_unavailable``,
-                ``not_private``.
+            ServiceError: ``watch_only``, ``killswitch_active``,
+                ``enforcement_unavailable``, ``not_private``.
             ConfirmationError: from commit-confirm.
         """
         wanted = Mode(mode)
         with self._lock:
+            if wanted is Mode.ENFORCE:
+                self._refuse_if_watch_only()
             if wanted is Mode.MONITOR:
                 before = self._effective_mode()
                 for change in self._confirmations.pending():
@@ -2099,8 +2137,17 @@ class PortLockService:
             return Applied(self._scope(), summary=summary)
 
     def set_default_deny(self, enabled: bool, *, actor: str, channel: str) -> Applied[bool]:
-        """Standing OS default-deny for new devices in enforce mode (commit-confirm to turn on)."""
+        """Standing OS default-deny for new devices in enforce mode (commit-confirm to turn on).
+
+        A watch-only process refuses to turn it on (DESIGN 14.28); turning it off is
+        always allowed.
+
+        Raises:
+            ServiceError: ``watch_only``, ``killswitch_active``.
+        """
         with self._lock:
+            if enabled:
+                self._refuse_if_watch_only()
             current = bool(self._settings.get("default_deny", False))
             if enabled == current:
                 return Applied(current)
@@ -2118,9 +2165,15 @@ class PortLockService:
             return Applied(False, summary=summary)
 
     def confirm_change(self, change_id: str, *, actor: str, channel: str) -> PendingChangeRecord:
-        """Confirm a pending change (enforce mode, scope, default-deny or lockdown)."""
+        """Confirm a pending change (enforce mode, scope, default-deny or lockdown).
+
+        A watch-only process never proposes enforce mode, default-deny or a lockdown, and
+        refuses to confirm one found in the store (``watch_only``).
+        """
         with self._lock:
             record = self._store.get_pending_change(change_id)
+            if record is not None and record.kind in _ENFORCING_CHANGES:
+                self._refuse_if_watch_only()
             if record is not None and record.kind == CHANGE_LOCKDOWN:
                 self._lockdown.confirm(change_id, actor=actor, channel=channel)
                 return record
@@ -2581,8 +2634,16 @@ class PortLockService:
             return Mode(value), "setting"
         return self._config.mode, "config"
 
+    def _watch_only(self) -> bool:
+        return self._watch_only_reason is not None
+
+    def _refuse_if_watch_only(self) -> None:
+        """DESIGN 14.28: a watch-only process refuses everything that would block."""
+        if self._watch_only_reason is not None:
+            raise ServiceError(self._watch_only_reason, code="watch_only")
+
     def _effective_mode(self) -> Mode:
-        if self._killswitch_latched:
+        if self._killswitch_latched or self._watch_only():
             return Mode.MONITOR
         mode, _ = self._chosen_mode()
         if mode is Mode.ENFORCE and self._privacy_problems:
@@ -2593,10 +2654,15 @@ class PortLockService:
     def _mode_info(self) -> ModeInfo:
         mode, source = self._chosen_mode()
         notes: list[str] = []
-        caps = self._live.capabilities()
-        can = caps.privileged and caps.block and not self._privacy_problems
-        if not caps.privileged or not caps.block:
-            notes.extend(caps.notes or ("the enforcer cannot block devices here",))
+        reason = self._watch_only_reason
+        if reason is not None:
+            notes.extend((reason, _NO_ANTIVIRUS_NOTE))
+            can = False
+        else:
+            caps = self._live.capabilities()
+            can = caps.privileged and caps.block and not self._privacy_problems
+            if not caps.privileged or not caps.block:
+                notes.extend(caps.notes or ("the enforcer cannot block devices here",))
         notes.extend(self._privacy_problems)
         if self._killswitch_latched:
             source = "killswitch"
@@ -2608,6 +2674,8 @@ class PortLockService:
             killswitch=self._killswitch_latched,
             can_enforce=can and not self._killswitch_latched,
             notes=tuple(notes),
+            watch_only=reason is not None,
+            watch_only_reason=reason,
         )
 
     def _write_mode(self, mode: Mode, *, actor: str, reason: str) -> None:
@@ -2626,6 +2694,12 @@ class PortLockService:
         self._publish("mode.changed", {"mode": self._mode_info().to_dict()})
 
     def _check_privacy(self) -> None:
+        if self._watch_only():
+            # DESIGN 14.28: watch-only neither checks nor changes permissions (its
+            # directory-privacy seam is an inert stand-in), and it never enforces, so
+            # there is nothing a private directory would allow. The doctor says so.
+            self._privacy_problems = ()
+            return
         problems: list[str] = []
         for label, path in (
             ("state", self._config.paths.state_dir),
@@ -3057,6 +3131,9 @@ class PortLockService:
         target = _target_of(decision, conn.scan_state)
         if target == _OPEN:
             return _OPEN, None
+        if self._watch_only():
+            # Watch-only: even a lockdown's decision is only what PortLock *would* do.
+            return _OPEN, target
         if self._effective_mode() is Mode.ENFORCE or decision.source is DecisionSource.LOCKDOWN:
             return target, None
         return _OPEN, target
@@ -3360,7 +3437,7 @@ class PortLockService:
         self._record_result(conn, Action.BLOCK, result, cause=cause, extra=extra)
         if not result.ok:
             return _result_enforcement(Outcome.FAILED, _OPEN, result, now, extra=extra)
-        if not self._blocked_by_us(iid):
+        if result.performed and not self._blocked_by_us(iid):
             # Already unusable (default-deny, or a previous run): PortLock now owns
             # releasing it (ARCHITECTURE D4).
             try:
@@ -3524,7 +3601,9 @@ class PortLockService:
         iid, fpv = device.instance_id, conn.fingerprint
         result = self._call(iid, Action.UNBLOCK, fpv, lambda: self._live.unblock(device))
         self._record_result(conn, Action.UNBLOCK, result, cause=cause)
-        if not result.ok:
+        if not result.performed:
+            # Failed, or a stand-in (dry-run, watch-only) that unblocked nothing: the device
+            # is still held back, so PortLock must neither forget that nor close its record.
             return result
         conn.arrived_under_deny = False
         if result.changed:
@@ -3543,7 +3622,7 @@ class PortLockService:
                 restored = self._call(
                     iid, Action.RESTORE, fpv, lambda e=entry: self._live.restore([e])
                 )
-                if restored.ok:
+                if restored.performed:
                     self._journal.close([record.id], reason="released")
         except StoreError as exc:
             self._mark_degraded("journal", str(exc))
@@ -3556,7 +3635,8 @@ class PortLockService:
             iid, Action.READ_WRITE, fpv, lambda: self._live.set_read_only(device, False)
         )
         self._record_result(conn, Action.READ_WRITE, result, cause=cause)
-        if not result.ok:
+        if not result.performed:
+            # Failed, or a stand-in that made nothing writable: the records stay open.
             return result
         if result.changed:
             self._released += 1
@@ -3568,7 +3648,7 @@ class PortLockService:
                 restored = self._call(
                     iid, Action.RESTORE, fpv, lambda e=entry: self._live.restore([e])
                 )
-                if restored.ok:
+                if restored.performed:
                     self._journal.close([record.id], reason="released")
         except StoreError as exc:
             self._mark_degraded("journal", str(exc))
@@ -3650,7 +3730,7 @@ class PortLockService:
                 GLOBAL_SCOPE, Action.RESTORE, None, lambda e=entry: self._live.restore([e])
             )
             self._record_result(None, Action.RESTORE, result, cause=cause)
-            if result.ok:
+            if result.performed:
                 try:
                     self._journal.close([record.id], reason="released")
                 except StoreError as exc:
@@ -3711,7 +3791,7 @@ class PortLockService:
                     orphan=True,
                     fingerprint=record.fingerprint,
                 )
-                if result.ok:
+                if result.performed:
                     try:
                         self._journal.close([record.id], reason="orphan released")
                     except StoreError as exc:
@@ -4553,21 +4633,21 @@ class PortLockService:
                 "scanning is available"
                 if self._scanning_available()
                 else "scanning is not available",
-                self._degraded.get("scan", ""),
+                "; ".join(
+                    part
+                    for part in (
+                        _NO_ANTIVIRUS_NOTE if self._watch_only() else "",
+                        self._degraded.get("scan", ""),
+                    )
+                    if part
+                ),
             ),
             ServiceCheck(
                 "service.lockdown",
                 "info",
                 f"lockdown is {self._lockdown.state.value}",
             ),
-            ServiceCheck(
-                "service.privacy",
-                "fail" if self._privacy_problems else "ok",
-                "the state and configuration directories are private"
-                if not self._privacy_problems
-                else "a directory is not private; enforce mode is refused",
-                "; ".join(self._privacy_problems),
-            ),
+            self._privacy_check(),
         ]
         if self._system_ids_note:
             checks.append(
@@ -4602,6 +4682,24 @@ class PortLockService:
             )
         )
         return checks
+
+    def _privacy_check(self) -> ServiceCheck:
+        if self._watch_only():
+            return ServiceCheck(
+                "service.privacy",
+                "info",
+                "the state and configuration directories were not checked for privacy: "
+                "watch-only neither checks nor changes permissions",
+                "a watch-only PortLock enforces nothing, so no blocking depends on them",
+            )
+        return ServiceCheck(
+            "service.privacy",
+            "fail" if self._privacy_problems else "ok",
+            "the state and configuration directories are private"
+            if not self._privacy_problems
+            else "a directory is not private; enforce mode is refused",
+            "; ".join(self._privacy_problems),
+        )
 
     def _audit_grant_created(self, grant: Grant, connection_id: int | None) -> None:
         event = ev.TRUST_ADDED if grant.kind is GrantKind.TRUST else ev.GRANT_CREATED

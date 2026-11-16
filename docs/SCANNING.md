@@ -31,6 +31,8 @@ Further limits, stated plainly:
   antivirus product already installed on the machine (ClamAV or Microsoft Defender).
   Without one, a known-bad file is caught only if its digest is on a configured hash
   list.
+- **A watch-only PortLock uses no antivirus product** (section 6), so there it finds
+  known malware only through a hash list.
 - **A scan is bounded.** It stops at its file, directory, byte and time limits. A scan cut
   short is `incomplete`, never `clean`.
 - **A read the device never answers cannot be interrupted.** The walk checks its time
@@ -159,7 +161,16 @@ it, `#` comments; `sha256sum` output is accepted as it is.
 ## 6. Antivirus adapters
 
 PortLock asks an installed product to scan the mounted volume and translates what it
-prints into findings (`portlock.scan.av`). Rules every adapter follows:
+prints into findings (`portlock.scan.av`).
+
+**Not in a watch-only process.** A PortLock that is watch-only (not elevated, or its files
+in a user's own folders; `OPERATIONS.md` section 0) builds its scanner without the ClamAV
+and Defender adapters. Its scans keep only the two engines that run inside PortLock and
+read files: the heuristics and the hash lists. Approving a drive, or asking for a scan,
+therefore reads the files on that drive and starts no program. `portlock doctor` and the
+status say that antivirus engines are not used in watch-only.
+
+Rules every adapter follows:
 
 - **Read-only.** ClamAV is run as `clamdscan` or `clamscan` with `--no-summary
   --infected -r <root>`, never with `--remove` or `--move`. Microsoft Defender is run as

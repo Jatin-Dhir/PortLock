@@ -10,8 +10,103 @@ rights on a real machine. They were taken from the code and the generated defini
 have never been executed by the author. Read each one before you run it. No enforcement
 mechanism has been run against a real device.
 
-All commands assume the `portlock` program is on the path. Add `--config FILE` to any of
-them if the configuration file is not in the default place.
+All commands assume the `portlock` program is on the path. Without an installation, run
+them as `python -m portlock ...` from the `src` folder. Sections 1 to 11 are about the
+system-wide installation, run as administrator (root); section 0 is about the watch-only
+one an ordinary user gets. Add `--config FILE` to any of them
+if the configuration file is not in the default place.
+
+## 0. Try it on your own PC (watch-only)
+
+For a person who wants to see PortLock on their own computer without it changing anything.
+
+**Who is watch-only.** A PortLock process is watch-only exactly when it could never be
+trusted to enforce: it is **not elevated** (administrator on Windows, root on Linux), **or**
+its state or configuration directory is **not a system-wide location** (it is inside a
+user's own profile). This is decided once, at start, and the mode does not change it.
+Files in a user's own folders can be changed by every program that user runs, so a policy
+or journal kept there must never drive the real enforcer, even from an elevated process.
+
+**What a watch-only process does.** It lists the real USB devices, decides, audits and
+serves the console. It runs no other program (no `icacls`, no `schtasks`, no antivirus),
+writes no registry value, creates no timer or task and calls no device disable, enable or
+eject function. The enforcer, the dead-man timer and the directory-permission tool are
+never built: inert stand-ins (`guard/watchonly.py`) take their place for the whole life of
+the process, and nothing inside it can switch them on. The only thing it changes is its own
+folder (on Linux it creates that folder with mode `0700`, readable by you only).
+
+**What it refuses**, with the plain reason (`409 watch_only` in the API) and leaving
+nothing behind: switching to enforce mode, engaging a lockdown (it stays `idle`), and
+turning default-deny on (turning it off stays allowed). Approving and denying devices work
+and are recorded; nothing is blocked or ejected. Approving a drive, or asking for a scan,
+reads the files on that drive with PortLock's own heuristics and hash lists; it starts no
+antivirus program (`SCANNING.md`).
+
+**If an enforcing PortLock left changes in place** (open journal records, or a lockdown
+that is not idle) in the directories a watch-only process is about to use, that process
+refuses to start: it says so on standard error, names the state directory, tells you to
+start PortLock as administrator or run `portlock recover` as administrator, and exits with
+code 3. It neither enforces nor undoes those changes, and closes no record. With per-user
+directories this cannot happen, because nothing is ever enforced there.
+
+> **Use an ordinary window, not an administrator one.** Open PowerShell normally, not with
+> "Run as administrator" or "Terminal (Admin)" (on Linux, not with `sudo`). In an
+> administrator window the default directories are the system-wide ones
+> (`%ProgramData%\PortLock`, `/var/lib/portlock` and `/etc/portlock`): that is a
+> **different installation, which can block devices**, also in monitor mode. `init` and
+> `run` say so in plain words when they run elevated. If a system-wide installation already
+> exists, an ordinary window still gets the separate watch-only one, and `init`, `status`
+> and `stop` tell you that the other one exists.
+
+In an ordinary PowerShell window, from the `PortLock` folder (Python 3.11 or later,
+nothing installed):
+
+```
+cd src
+python -m portlock init
+python -m portlock run
+```
+
+`init` asks for an administrator name and a password (twice) and prints the audit
+verification key and eight recovery codes once. It creates nothing until it has a password
+it accepts, so a refused password costs nothing: run `init` again. `run` prints the console
+address (`http://127.0.0.1:47600/` unless `[api] port` says otherwise); open it and sign
+in. If the port is taken, `run` names the configuration file and its `[api] port` setting.
+If PortLock is already running, it prints that one's address and how to stop it.
+
+**To stop it:** press Ctrl+C in its window, or run `python -m portlock stop` from another
+ordinary window in the same folder. Closing the window is also safe: nothing on the
+computer was changed, the next `run` removes the files the closed one left behind
+(`runtime.json`, `stop.request`), and `stop` or `status` say at once that PortLock is not
+running.
+
+`python -m portlock doctor --offline` starts with two plain lines: `guard.watch_only` and
+`guard.directories` (per-user, with the reason enforce mode is not available). Checks a
+watch-only process does not make, such as whether the directories are private, are shown
+as `info` "not checked", never as `ok`.
+
+The files go to `%LOCALAPPDATA%\PortLock\state` and `...\config` (Linux:
+`$XDG_STATE_HOME/portlock`, default `~/.local/state/portlock`, and
+`$XDG_CONFIG_HOME/portlock`, default `~/.config/portlock`). Deleting that folder removes
+PortLock completely.
+
+**What was run.** These commands, on one Windows 11 machine, not elevated, with
+`PORTLOCK_HOME` set to a new throwaway folder, `port` changed in that folder's
+`portlock.toml`, and the password passed with `init --password-stdin`. Over the API the
+service reported mode `monitor` and `watch_only`, the machine's real devices (counts only
+were recorded), an event stream that answered, and an audit chain that verified. Asked for
+enforce mode, a lockdown and default-deny, it refused each with `watch_only` and left no
+lockdown and no pending change. A console break (what Ctrl+C sends) stopped it with exit
+code 0; after a killed process, `stop` said at once that nothing was running and the next
+`run` started normally. Every run was made under `tests/hardware/flight_recorder.py`,
+which refuses and records each attempt to start a program, write the registry or call a
+mutating operating-system seam, and records every file written and socket opened: nothing
+was attempted, nothing was written outside the throwaway folder, and only `127.0.0.1` was
+bound. The same checks are the test `tests/hardware/test_watch_only_live.py`
+(`python -m pytest --run-hardware tests/hardware`); it passes on Windows and, where there
+is no USB bus, under WSL. The console was opened in a browser against that service. Not
+done: plugging a device in or out while the real service runs, and anything as
+administrator.
 
 ## 1. Where things are
 
@@ -19,7 +114,16 @@ them if the configuration file is not in the default place.
 | --- | --- | --- |
 | State directory | `%ProgramData%\PortLock` | `/var/lib/portlock` |
 | Configuration directory | `%ProgramData%\PortLock` (same directory) | `/etc/portlock` |
+| Run as an ordinary user (watch-only) | `%LOCALAPPDATA%\PortLock\state` and `...\config` | `$XDG_STATE_HOME/portlock` and `$XDG_CONFIG_HOME/portlock` |
 | Relocate both | `PORTLOCK_HOME=<home>` gives `<home>\state` and `<home>\config`; or set `[paths]` in `portlock.toml`. The file wins over the variable. | same |
+
+Directories inside a user's own profile (`USERPROFILE` on Windows, `HOME` elsewhere) are
+per-user, wherever they come from (the defaults, `PORTLOCK_HOME` or `[paths]`): a process
+using them is watch-only for its whole life, even when elevated, because every program
+that user runs could change them. Another spelling of the profile does not get around
+this: short names (`C:\Users\ALICE~1`), `\\?\` prefixes, `..`, junctions, symbolic links
+and `subst` drives are resolved before comparing, and a UNC or device path, or a profile
+variable that is empty or cannot be resolved, counts as not system-wide.
 
 | File | Directory | Purpose |
 | --- | --- | --- |
@@ -35,10 +139,12 @@ them if the configuration file is not in the default place.
 
 ### Private directories
 
-Both directories must be private to the account the service runs as. The service makes
-them so at **every start** and then checks; if it cannot, it records a critical alert and
-**refuses enforce mode** (it keeps monitoring). `portlock doctor` shows the result as
-`guard.state_dir` and `guard.config_dir`.
+Both directories must be private to the account the service runs as. A system-wide
+service (elevated, system-wide directories) makes them so at **every start, in monitor
+mode too**, and then checks; if it cannot, it records a critical alert and **refuses
+enforce mode** (it keeps monitoring). A watch-only process never touches permissions
+outside its own folder. `portlock doctor` shows the result as `guard.state_dir` and
+`guard.config_dir` (as `info` "not checked" in a watch-only process).
 
 - Linux: owned by the service's user or root, mode `0700`, not a symbolic link, and every
   parent owned by that user or root and not writable by others (sticky directories such as
@@ -134,8 +240,11 @@ as PortLock is concerned: the next start recovers (section 8).
 portlock init
 ```
 
-Run as the service's account, on a machine where the service is not running. Run on Windows
-and under WSL with a throwaway home. It:
+Run as the service's account, on a machine where the service is not running: for a
+system-wide installation that means an administrator window (root on Linux), and `init`
+says in plain words that this installation can block devices. Run on Windows and under WSL
+with a throwaway home. It creates nothing until it has a password it accepts; after three
+refused passwords it says so and that you can run `init` again. Then it:
 
 1. creates the directories (private on Linux; see section 1);
 2. if there is no configuration file, writes `portlock.toml` with `[audit] hmac_key_file`
@@ -178,11 +287,14 @@ Run under WSL with a throwaway home. A new installation is in **monitor mode**:
 service as not running until it has written `runtime.json`. Each command that logs in
 writes `auth.login` and `auth.logout` records to the audit log.
 
-`portlock doctor` reports each mechanism. Without root it reports `warn` for every
-mechanism ("unavailable (not running as root)") and, in WSL, `fail` for the backend
-("no USB bus under /sys"). Under the real service account every mechanism you expect should
-be `ok`. Anything else is reported as *not enforced* in decisions, never as blocked.
-`doctor` exits with 5 if any check is `fail`.
+`portlock doctor` reports each mechanism. Under the real service account (root or
+administrator, with the system-wide directories) every mechanism you expect should be
+`ok`. Anything else is reported as *not enforced* in decisions, never as blocked. Run as an
+ordinary user the process is watch-only, and `doctor` says so first (`guard.watch_only`,
+with the reason), reports `warn` for `guard.privilege`, and lists every mechanism as `info`
+"not probed (watch-only never touches enforcement mechanisms)"; in WSL it also reports
+`fail` for the backend ("no USB bus under /sys"). `doctor` exits with 5 if any check is
+`fail`.
 
 On Linux, `doctor` also reports `guard.boot_default_deny`. Add `usbcore.authorized_default=0`
 to the kernel command line (in your boot loader's configuration) if you want devices
@@ -247,9 +359,15 @@ the deadline even if the service has died. That timer has never been run against
 If you are cut off, do nothing: the change rolls back. An operator whose only way in is a
 USB network adapter or serial console gets it back automatically.
 
-Switching to enforce is refused up front if the enforcer cannot block devices (not root, no
-mechanism, or a directory that is not private). Run under WSL as an unprivileged user it
-says `this enforcer cannot block devices here: ... (enforcement_unavailable)` and exits 1.
+Switching to enforce is refused up front if the enforcer cannot block devices (no
+mechanism, or a directory that is not private). In a watch-only process (not elevated, or
+per-user directories) enforce mode, a lockdown and turning default-deny on are refused with
+the code `watch_only` and the plain reason, and nothing is applied, so there is nothing to
+confirm or roll back.
+Run as an ordinary user, `portlock mode enforce` says `PortLock cannot change this
+computer: it is not running as administrator. It stays watch-only: it shows and records,
+and blocks nothing. (watch_only)` and exits 1; with a per-user home the sentence also
+names the folders. Seen on Windows and under WSL.
 
 ## 6. Lockdown
 
@@ -262,7 +380,9 @@ portlock lockdown lift --recovery-code
 ```
 
 Engaging a lockdown blocks all removable storage and turns on default-deny, in monitor mode
-as well as enforce mode. It is itself a commit-confirm change (section 5). Hubs, built-in
+as well as enforce mode, in a system-wide service. A watch-only process refuses to engage
+one (`watch_only`): the lockdown stays `idle`, so it can never be reported as active while
+nothing is blocked. It is itself a commit-confirm change (section 5). Hubs, built-in
 devices, the system volume and enrolled or pinned devices are never touched. A device
 without storage that was connected before the lockdown stays; a new input-only device is
 accepted if `lockdown.allow_new_input_devices` is true (the default).
@@ -322,6 +442,11 @@ anything, so a failed attempt leaves no kill switch behind. If the service is ru
 file and waits up to 10 seconds for the service to empty the journal; if it does not,
 stop the PortLock process and run `recover` again.
 
+`recover` refuses a per-user installation (directories inside a user's own profile)
+before it writes anything, the kill-switch file included: any program that user runs could
+have written that journal, and an elevated `recover` would apply it with the real
+enforcer. A per-user installation is watch-only and never changed anything to restore.
+
 Order of preference when something is wrong: `portlock cancel` or let the commit-confirm
 timer run; `portlock lockdown lift`; the kill switch; `portlock recover`.
 
@@ -337,7 +462,8 @@ code 3. A damaged database is renamed to `portlock.db.damaged-<time>` and a new 
 its first record naming the old file's hash.
 
 Exit codes of `portlock run`: 0 clean stop, 1 unexpected error, 2 already running, 3 state
-unusable, 4 configuration rejected, 5 the API could not listen. A second `portlock run`
+unusable (including a watch-only process that found changes an enforcing PortLock left in
+place, section 0), 4 configuration rejected, 5 the API could not listen. A second `portlock run`
 prints `portlock is already running` and exits 2 (run under WSL).
 
 ## 9. The audit log
@@ -443,8 +569,11 @@ Backing up the initial audit key and the recovery codes is separate, and offline
 | Symptom | Meaning |
 | --- | --- |
 | `enforce mode refused` alert, `mode` shows `monitor` | a directory is not private; read `portlock doctor` |
+| "PortLock cannot change this computer" (`watch_only`) when switching to enforce, engaging a lockdown or turning default-deny on | this process is watch-only: not elevated, or its directories are in a user's own folders (section 0). Use the system-wide installation from an administrator window |
+| a watch-only `run` refuses to start because an enforcing PortLock left changes | start PortLock as administrator, or run `portlock recover` as administrator, on that installation |
+| `run` says the port is taken | another program uses it; change `[api] port` in the configuration file it names |
 | a decision says `not enforced` or `unsupported` | the mechanism is unavailable (not root, no such attribute, read-only sysfs) |
 | `cannot be made private` | fix the directory's owner and mode, or the access list, then restart |
-| exit code 5 from `run` | the API port is taken by another process |
+| exit code 5 from `run` | the API port is taken by another process (see above) |
 | exit code 3 from `run` | the database is damaged or too new; nothing was deleted; restore a backup or move it aside |
 | `audit verify` fails | the chain, head file or a MAC does not fit; the service marks the log degraded and raises a critical alert until a later verification succeeds |

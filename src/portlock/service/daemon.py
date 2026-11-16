@@ -4,11 +4,16 @@
   damaged file is renamed aside and a new log is started, DESIGN 14.23), opens the
   stores and the audit log, and wires the backend, the enforcer (with the journal's
   write-ahead hook), the dead-man timer, the directory-privacy check and the
-  :class:`~portlock.core.service.PortLockService`.
+  :class:`~portlock.core.service.PortLockService`. Unless the enforcer is injected, the
+  process's posture decides once (``guard.watchonly``, DESIGN 14.28): a process that is
+  not elevated, or whose directories are not system-wide, is watch-only and gets inert
+  stand-ins for the last three (the real ones are never built) and a scanner without the
+  antivirus engines; every other process gets the real objects, in monitor mode too.
 * :func:`run` is the process: single-instance lock, the kill switch honoured *before*
   the database is opened, start, the runtime file with the secret the command line
   authenticates with (14.20), the ticker, signals and a clean shutdown that restores
-  journaled state unless ``fail_closed`` is set.
+  journaled state unless ``fail_closed`` is set. A watch-only process restores nothing
+  and refuses to start when it finds changes an enforcing PortLock left in place.
 
 Nothing here contains pipeline logic.
 """
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import json
 import logging
 import os
@@ -25,7 +31,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -60,7 +66,14 @@ from portlock.guard.base import DeviceBackend, Enforcer, JournalEntry
 from portlock.guard.fake import FakeBackend
 from portlock.guard.safety import SafeEnforcer, SafetyContext
 from portlock.guard.seams import ExternalTimer, FakeExternalTimer
-from portlock.lockdown.manager import Credential, KillSwitch, RollbackReport, rollback
+from portlock.guard.watchonly import WATCH_ONLY_ENGINES, Posture, StandIns, detect_posture
+from portlock.lockdown.manager import (
+    Credential,
+    KillSwitch,
+    LockdownState,
+    RollbackReport,
+    rollback,
+)
 from portlock.scan.inspector import ScanLimits
 from portlock.scan.scanner import build_scanner
 
@@ -114,6 +127,10 @@ _FILE_SINK_BYTES = 64 * 1024 * 1024
 _SECOND_SIGNAL_GRACE = 10.0
 _SINK_CLOSE_SECONDS = 5.0
 _SECRET_BYTES = 32
+# How long the main thread waits for the stop event at a time. A signal handler runs only
+# when the main thread is back in the interpreter, and on Windows before Python 3.13 a lock
+# wait cannot be interrupted: with an untimed wait Ctrl+C and Ctrl+Break did nothing at all.
+_STOP_POLL_SECONDS = 0.25
 
 
 class ApiServerLike(Protocol):
@@ -150,6 +167,10 @@ class Runtime:
         initial_key: the initial key of an audit MAC key store created by this start
             (the operator keeps it offline), or ``None``.
         store_recovery: set when a damaged database was moved aside.
+        posture: what the process may do (``guard.watchonly``); ``None`` when the
+            enforcer was injected (tests, simulation).
+        stand_ins: the watch-only stand-ins the service was given, or ``None`` when it
+            has the real objects (or injected ones).
     """
 
     config: Config
@@ -170,6 +191,17 @@ class Runtime:
     cli_secret: str
     initial_key: AuditKey | None = None
     store_recovery: StoreRecovery | None = None
+    posture: Posture | None = None
+    stand_ins: StandIns | None = None
+
+    @property
+    def watch_only(self) -> bool:
+        """True if this process is watch-only (``guard.watchonly``) for its whole life.
+
+        A runtime whose enforcer was injected (tests, simulation) has no posture and
+        reports False: what its fakes may do is up to whoever injected them.
+        """
+        return self.stand_ins is not None
 
     def close(self) -> None:
         """Flush the audit sinks (at most 5 s) and close the database. Safe twice."""
@@ -233,6 +265,10 @@ def build_runtime(
     dir_privacy: DirPrivacyLike | None = None,
     system_ids: Callable[[Sequence[UsbDevice]], frozenset[str]] | None = None,
     recover_argv: Sequence[str] | None = None,
+    seams: factory.SystemSeams | None = None,
+    elevated: bool | None = None,
+    env: Mapping[str, str] | None = None,
+    posture: Posture | None = None,
 ) -> Runtime:
     """Compose every component from a configuration. Nothing is started.
 
@@ -244,15 +280,33 @@ def build_runtime(
     an injected timer and directory-privacy check, so that a test can never reach the
     real operating-system timer or ``icacls`` by omission.
 
+    When the enforcer is not injected (an installed PortLock), the process's posture
+    decides once (``guard.watchonly``, DESIGN 14.28); ``posture`` passes one already
+    decided, else it is detected here with ``elevated`` and ``env`` (by default asked of
+    the machine). A watch-only process gets the three stand-ins, never a real enforcer,
+    timer or directory-privacy object, and a scanner without the antivirus engines; any
+    other process gets the real objects, exactly as before watch-only existed. ``seams``
+    replaces the operating-system seams the real objects are built on (tests).
+
     Raises:
         StoreError: the database cannot be opened, or is from a newer PortLock.
         ConfigError: a component rejects the configuration.
-        ValueError: an injected enforcer without its seams.
+        ValueError: an injected enforcer without its seams, or a watch-only process
+            handed a timer or directory-privacy check of its own.
     """
     real_clock: Clock = clock if clock is not None else SystemClock()
     injected = enforcer is not None or enforcer_factory is not None
     if injected and not simulation and (timer is None or dir_privacy is None):
         raise ValueError("an injected enforcer needs an injected timer and dir_privacy")
+    if simulation or injected:
+        posture = None
+    elif posture is None:
+        posture = detect_posture(config, elevated=elevated, env=env, platform=platform)
+    stand_ins: StandIns | None = None
+    if posture is not None and posture.watch_only:
+        if timer is not None or dir_privacy is not None:
+            raise ValueError("a watch-only process gets the stand-ins, not an injected seam")
+        stand_ins = StandIns.create(elevated=posture.elevated)
     state_dir = Path(config.paths.state_dir)
     ensure_private_dir(state_dir)
     ensure_private_dir(config.paths.config_dir)
@@ -294,26 +348,38 @@ def build_runtime(
                 if simulation
                 else factory.create_backend(config, clock=real_clock, platform=platform)
             )
-        if enforcer is not None:
-            chosen_enforcer = enforcer
-        elif enforcer_factory is not None:
-            chosen_enforcer = enforcer_factory(journal.write_ahead)
+        chosen_enforcer: Enforcer
+        chosen_timer: ExternalTimer
+        privacy: DirPrivacyLike
+        if stand_ins is not None:
+            # Watch-only: the real objects are not even built (DESIGN 14.28).
+            chosen_enforcer = stand_ins.enforcer
+            chosen_timer = stand_ins.timer
+            privacy = stand_ins.dir_privacy
         else:
-            chosen_enforcer = factory.create_enforcer(
-                config, platform=platform, write_ahead=journal.write_ahead
+            if enforcer is not None:
+                chosen_enforcer = enforcer
+            elif enforcer_factory is not None:
+                chosen_enforcer = enforcer_factory(journal.write_ahead)
+            else:
+                chosen_enforcer = factory.create_enforcer(
+                    config, platform=platform, write_ahead=journal.write_ahead, seams=seams
+                )
+            if timer is not None:
+                chosen_timer = timer
+            elif simulation:
+                chosen_timer = FakeExternalTimer()
+            else:
+                chosen_timer = factory.create_external_timer(
+                    config, platform=platform, runner=seams.runner if seams else None
+                )
+            privacy = (
+                dir_privacy
+                if dir_privacy is not None
+                else factory.create_dir_privacy(
+                    platform=platform, runner=seams.runner if seams else None
+                )
             )
-        chosen_timer = timer
-        if chosen_timer is None:
-            chosen_timer = (
-                FakeExternalTimer()
-                if simulation
-                else factory.create_external_timer(config, platform=platform)
-            )
-        privacy: DirPrivacyLike = (
-            dir_privacy
-            if dir_privacy is not None
-            else factory.create_dir_privacy(platform=platform)
-        )
         probe = system_ids
         if probe is None:
             probe = (
@@ -322,7 +388,11 @@ def build_runtime(
                 else (lambda devices: factory.system_instance_ids(devices, platform=platform))
             )
         argv = tuple(recover_argv) if recover_argv is not None else factory.dead_man_command(config)
-        chosen_scanner = scanner if scanner is not None else _build_scanner(config, real_clock)
+        chosen_scanner = (
+            scanner
+            if scanner is not None
+            else _build_scanner(config, real_clock, watch_only=stand_ins is not None)
+        )
 
         def guard_doctor(checks: Sequence[ServiceCheck]) -> DoctorLike:
             report = factory.doctor(
@@ -333,6 +403,7 @@ def build_runtime(
                 platform=platform,
                 dir_privacy=privacy,
                 system_ids=probe,
+                posture=posture,
             )
             extra = tuple(
                 factory.DoctorCheck(check.id, check.status, check.summary, check.detail)
@@ -361,6 +432,9 @@ def build_runtime(
             has_users=accounts.has_users,
             simulation=simulation,
             platform=platform,
+            watch_only_reason=(
+                posture.refusal() if posture is not None and stand_ins is not None else None
+            ),
         )
     except BaseException:
         db.close()
@@ -384,6 +458,8 @@ def build_runtime(
         cli_secret=secrets.token_urlsafe(_SECRET_BYTES),
         initial_key=initial_key,
         store_recovery=recovery,
+        posture=posture,
+        stand_ins=stand_ins,
     )
 
 
@@ -481,7 +557,13 @@ def _auth_policy(config: Config) -> AuthPolicy:
     )
 
 
-def _build_scanner(config: Config, clock: Clock) -> ScannerLike | None:
+def _build_scanner(config: Config, clock: Clock, *, watch_only: bool) -> ScannerLike | None:
+    """The scanner the configuration asks for.
+
+    A watch-only process starts no program, so it keeps only the engines that run inside
+    PortLock and only read files (``WATCH_ONLY_ENGINES``): ClamAV and Microsoft Defender
+    would start ``clamdscan`` or ``MpCmdRun.exe``.
+    """
     if not config.scan.enabled:
         return None
     limits = ScanLimits(
@@ -490,8 +572,14 @@ def _build_scanner(config: Config, clock: Clock) -> ScannerLike | None:
         max_seconds=float(config.scan.max_seconds),
         follow_symlinks=config.scan.follow_symlinks,
     )
+    engines = tuple(config.scan.engines)
+    if watch_only:
+        engines = tuple(name for name in engines if name in WATCH_ONLY_ENGINES)
+        if not engines:
+            _LOG.warning("scanning is unavailable: watch-only uses no antivirus engine")
+            return None
     try:
-        return build_scanner(config.scan.engines, limits=limits, clock=clock)
+        return build_scanner(engines, limits=limits, clock=clock)
     except ConfigError as exc:
         _LOG.error("scanning is unavailable: %s", exc)
         return None
@@ -669,16 +757,37 @@ def run(
     system_ids: Callable[[Sequence[UsbDevice]], frozenset[str]] | None = None,
     recover_argv: Sequence[str] | None = None,
     on_started: Callable[[Runtime], None] | None = None,
+    seams: factory.SystemSeams | None = None,
+    elevated: bool | None = None,
+    env: Mapping[str, str] | None = None,
+    announce: Callable[[Runtime, str, int], None] | None = None,
+    program: str = "portlock",
+    config_file: str | os.PathLike[str] | None = None,
 ) -> int:
     """Run the service until a stop signal or ``stop.request``. Returns an exit code.
 
     Exit codes: 0 clean stop; 1 unexpected failure; 2 already running; 3 state unusable
-    (after restoring journaled state, unless ``fail_closed``); 4 configuration rejected;
+    (after restoring journaled state, unless ``fail_closed``), or a watch-only process
+    that found changes an enforcing PortLock left in place; 4 configuration rejected;
     5 the API could not listen.
 
     ``api_factory`` builds the HTTP API from the runtime (``console.api``); without one
     the service runs without a listener and ``runtime.json`` names port 0.
     ``on_started`` is called once everything is up (tests use it to reach the runtime).
+    ``announce`` is called once with the runtime and the console's host and port, when
+    the listener is up (the command line prints the address from it). ``program`` (how
+    the user starts PortLock) and ``config_file`` (the file the configuration came from)
+    are only named in messages.
+
+    Right after the instance lock is taken, a ``stop.request`` and a ``runtime.json`` left
+    by a process that was killed are deleted: they belong to no running service, and the
+    old stop request would end this one at its first tick.
+
+    A watch-only process (``guard.watchonly``) builds no real enforcer, timer or
+    directory-privacy object at all: before the database it restores nothing (it never
+    changed anything), and once the database is open it refuses to start if it finds
+    open journal records or a lockdown that is not idle, writing nothing to the journal.
+    ``seams``, ``elevated`` and ``env`` are passed to :func:`build_runtime`.
     """
     real_clock: Clock = clock if clock is not None else SystemClock()
     state_dir = Path(config.paths.state_dir)
@@ -689,18 +798,23 @@ def run(
         return EXIT_STATE_UNUSABLE
     lock = InstanceLock(state_dir / LOCK_FILE_NAME)
     if not lock.acquire():
-        sys.stderr.write("portlock is already running\n")
+        sys.stderr.write(_already_running(state_dir, program))
         return EXIT_ALREADY_RUNNING
     stopping = stop_event if stop_event is not None else threading.Event()
     try:
+        _remove_stale_files(state_dir)
         injected = enforcer is not None or enforcer_factory is not None
         if injected and not simulation and (timer is None or dir_privacy is None):
             raise ValueError("an injected enforcer needs an injected timer and dir_privacy")
-        privacy = (
-            dir_privacy
-            if dir_privacy is not None
-            else factory.create_dir_privacy(platform=platform)
-        )
+        posture: Posture | None = None
+        if not simulation and not injected:
+            posture = detect_posture(config, elevated=elevated, env=env, platform=platform)
+        watch_only = posture is not None and posture.watch_only
+        privacy: DirPrivacyLike | None = dir_privacy
+        if privacy is None and not watch_only:
+            privacy = factory.create_dir_privacy(
+                platform=platform, runner=seams.runner if seams else None
+            )
         early_backend = backend
 
         def raw_enforcer(journal: RecoveryJournal) -> Enforcer:
@@ -709,7 +823,7 @@ def run(
             if enforcer_factory is not None:
                 return enforcer_factory(journal.write_ahead)
             return factory.create_enforcer(
-                config, platform=platform, write_ahead=journal.write_ahead
+                config, platform=platform, write_ahead=journal.write_ahead, seams=seams
             )
 
         def raw_backend() -> DeviceBackend:
@@ -724,7 +838,9 @@ def run(
 
         # DESIGN 11 and 14.18: a broken database must not stand between the operator and
         # the kill switch, so it is honoured from the journal file before anything else.
-        if KillSwitch(config.paths.kill_switch_file, privacy).is_set():
+        # A watch-only process skips this: it never changed anything it could restore,
+        # and it must not build an enforcer (or a privacy check that runs icacls) to try.
+        if privacy is not None and KillSwitch(config.paths.kill_switch_file, privacy).is_set():
             _pre_database_rollback(
                 config,
                 reason="killswitch",
@@ -746,9 +862,11 @@ def run(
                 dir_privacy=privacy,
                 system_ids=system_ids,
                 recover_argv=recover_argv,
+                seams=seams,
+                posture=posture,
             )
         except (StoreError, AuditError) as exc:
-            if not config.fail_closed:
+            if not config.fail_closed and not watch_only:
                 _pre_database_rollback(
                     config,
                     reason="state_unusable",
@@ -756,15 +874,23 @@ def run(
                     backend=raw_backend(),
                     clock=real_clock,
                 )
+            hint = (
+                "" if watch_only else f"; '{program} recover' restores journaled settings meanwhile"
+            )
             sys.stderr.write(
                 f"portlock cannot use its state ({exc}). Nothing was deleted. Restore the "
-                "database from a backup or move it aside, then start again; "
-                "'portlock recover' restores journaled settings meanwhile.\n"
+                f"database from a backup or move it aside, then start again{hint}.\n"
             )
             return EXIT_STATE_UNUSABLE
         except ConfigError as exc:
             sys.stderr.write(f"portlock: invalid configuration: {exc}\n")
             return EXIT_CONFIG
+        if runtime.posture is not None and runtime.watch_only:
+            found = _leftovers(runtime)
+            if found:
+                runtime.close()
+                sys.stderr.write(_leftovers_message(runtime.posture, state_dir, found, program))
+                return EXIT_STATE_UNUSABLE
         return _serve(
             runtime,
             install_signal_handlers=install_signal_handlers,
@@ -772,9 +898,82 @@ def run(
             tick_seconds=tick_seconds,
             stopping=stopping,
             on_started=on_started,
+            announce=announce,
+            config_file=Path(config_file) if config_file is not None else None,
         )
     finally:
         lock.release()
+
+
+def _remove_stale_files(state_dir: Path) -> None:
+    """Delete the stop request and runtime file a killed process left (we hold the lock)."""
+    for name in (STOP_REQUEST_NAME, RUNTIME_FILE_NAME):
+        try:
+            (state_dir / name).unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _LOG.warning("a stale %s could not be removed: %s", name, exc)
+
+
+def _already_running(state_dir: Path, program: str) -> str:
+    """What a second ``run`` says: where the running console is and how to stop it."""
+    lines = ["portlock is already running."]
+    data = read_runtime_file(state_dir)
+    if data is not None and data["port"]:
+        host = str(data["host"])
+        shown = f"[{host}]" if ":" in host else host
+        lines.append(f"  Its console: http://{shown}:{data['port']}/")
+    lines.append(f"  To stop it: press Ctrl+C in its window, or run '{program} stop'.")
+    return "\n".join(lines) + "\n"
+
+
+def _leftovers(runtime: Runtime) -> list[str]:
+    """What an enforcing PortLock left in this state directory, read without changing it.
+
+    Anything that cannot be read counts as found: a watch-only process that cannot show
+    there is nothing to undo must not start and claim it changes nothing.
+    """
+    found: list[str] = []
+    try:
+        records = runtime.journal.open_records()
+    except Exception as exc:
+        found.append(f"the recovery journal cannot be read ({type(exc).__name__})")
+    else:
+        if records:
+            found.append(f"{len(records)} open record(s) in the recovery journal")
+    try:
+        state = runtime.store.get_lockdown().state
+    except Exception as exc:
+        found.append(f"the lockdown record cannot be read ({type(exc).__name__})")
+    else:
+        if state != LockdownState.IDLE.value:
+            found.append(f"a lockdown in state {state!r}")
+    return found
+
+
+def _leftovers_message(
+    posture: Posture, state_dir: Path, found: Sequence[str], program: str
+) -> str:
+    what = "; ".join(found)
+    if posture.system_wide:
+        advice = (
+            f"Start PortLock as administrator, or run '{program} recover' as administrator, "
+            "to undo them."
+        )
+    else:
+        # A per-user folder can be written by any program this user runs, and an
+        # elevated `recover` refuses it: nothing here may invite one.
+        advice = (
+            "This folder belongs to this user, so a watch-only PortLock never enforced "
+            "anything here: move the folder aside to start afresh, and have an "
+            "administrator check the computer if these changes are real."
+        )
+    return (
+        f"portlock: the state directory {state_dir} holds changes an enforcing PortLock "
+        f"left in place ({what}). This PortLock is watch-only and can neither enforce "
+        f"nor undo them, so it does not start. {advice}\n"
+    )
 
 
 def _serve(
@@ -785,6 +984,8 @@ def _serve(
     tick_seconds: float,
     stopping: threading.Event,
     on_started: Callable[[Runtime], None] | None,
+    announce: Callable[[Runtime, str, int], None] | None = None,
+    config_file: Path | None = None,
 ) -> int:
     state_dir = Path(runtime.config.paths.state_dir)
     service = runtime.service
@@ -807,7 +1008,7 @@ def _serve(
                 api.start()
                 host, port = api.host, api.port
             except OSError as exc:
-                sys.stderr.write(f"portlock: the API cannot listen ({exc}).\n")
+                sys.stderr.write(_cannot_listen(runtime.config, exc, config_file))
                 api = None
                 return EXIT_PORT
         _write_runtime_file(
@@ -827,9 +1028,11 @@ def _serve(
             daemon=True,
         )
         ticker.start()
+        if announce is not None:
+            announce(runtime, host, port)
         if on_started is not None:
             on_started(runtime)
-        stopping.wait()
+        _wait_until_stopped(stopping)
     except Exception as exc:
         _LOG.error("portlock stopped on an unexpected error", exc_info=exc)
         code = EXIT_ERROR
@@ -853,6 +1056,33 @@ def _serve(
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(number, handler)
     return code
+
+
+def _cannot_listen(config: Config, exc: OSError, config_file: Path | None) -> str:
+    """A plain message for a console that cannot listen, naming the setting to change."""
+    where = f"{config.api.host}:{config.api.port}"
+    source = config_file if config_file is not None else Path(config.paths.config_file)
+    # EADDRINUSE is WSAEADDRINUSE (10048) on Windows; EACCES (10013 there) is a port that
+    # Windows reserves or another program holds exclusively.
+    if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+        cause = "another program is already using that port"
+    else:
+        cause = exc.strerror or str(exc)
+    return (
+        f"portlock: the console cannot listen on {where}: {cause}.\n"
+        f"  Choose a free port: set port = <number> under [api] in {source}, then start "
+        "again.\n"
+    )
+
+
+def _wait_until_stopped(stopping: threading.Event) -> None:
+    """Block the main thread until ``stopping`` is set, staying reachable by signals.
+
+    The wait is cut into short pieces so that the interpreter gets to run a pending
+    signal handler between them (see ``_STOP_POLL_SECONDS``).
+    """
+    while not stopping.wait(_STOP_POLL_SECONDS):
+        pass
 
 
 def _tick_loop(

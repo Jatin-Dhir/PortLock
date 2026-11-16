@@ -6,10 +6,8 @@ import { count, countdown, liveAgo, plural, timeEl } from "../fmt.js";
 import { deviceTable, openDeviceDetail } from "../devicetable.js";
 import { mountPending } from "../pending.js";
 import { scope, state } from "../store.js";
-import { DEGRADED_TEXT, POSTURE_TEXT, enforcementTruth, posture } from "../truth.js";
+import { DEGRADED_TEXT, POSTURE_TEXT, enforcementTruth, posture, postureCopy } from "../truth.js";
 import { chip, empty, pageHead, panel, severityChip } from "../ui.js";
-
-const LADDER = ["monitor", "enforce", "lockdown"];
 
 function wouldChange() {
   return [...state.devices.values()].filter((conn) => !conn.protected && conn.enforcement && conn.enforcement.would).length;
@@ -23,54 +21,21 @@ function blockedNow() {
 
 function band() {
   const status = state.status;
-  const kind = posture(status);
   const lock = status.lockdown;
   const mode = status.mode;
   const enforcer = status.enforcer;
-  let headline;
-  let sub;
+  // The words, and which rungs to draw, are decided in truth.js (tested under Node).
+  const copy = postureCopy(status, { would: wouldChange(), blockedNow: blockedNow(), plural });
+  const kind = copy.kind;
   let clock = null;
   const facts = [];
-  const notes = [];
+  const sub = h(
+    "span",
+    {},
+    copy.sub.map((part) => (typeof part === "string" ? part : h("strong", {}, part.strong))),
+  );
 
-  if (kind === "monitor") {
-    const would = wouldChange();
-    headline = "Nothing is being blocked.";
-    sub = h(
-      "span",
-      {},
-      "PortLock is watching and recording what it would do. ",
-      h("strong", {}, "It changes nothing on this machine."),
-      would > 0 ? ` In enforce mode ${plural(would, "connected device", "connected devices")} would be blocked or made read-only.` : "",
-    );
-    if (mode.mode === "enforce") {
-      notes.push(
-        `Enforce mode is chosen but is not in force${mode.killswitch ? ": the kill switch is on" : mode.notes.length ? `: ${mode.notes.join(" ")}` : ""}.`,
-      );
-    }
-    if (mode.mode === "monitor" && !mode.can_enforce) {
-      notes.push(`This machine cannot enforce yet${mode.notes.length ? `: ${mode.notes.join(" ")}` : "."}`);
-    }
-  } else if (kind === "enforce") {
-    headline = "Enforcing: devices policy has not approved are blocked.";
-    sub = h(
-      "span",
-      {},
-      "Keyboards, mice, hubs, built-in devices and enrolled input devices are ",
-      h("strong", {}, "never touched"),
-      ". ",
-      `${plural(blockedNow(), "connected device is", "connected devices are")} blocked now.`,
-    );
-    if (enforcer && !enforcer.block) notes.push("This machine reports that it cannot block devices. Decisions will show as not enforced.");
-  } else {
-    headline = "Lockdown: all removable storage is blocked.";
-    sub = h(
-      "span",
-      {},
-      "New devices are denied. Protected devices are never touched. ",
-      lock.pending_change_id ? h("strong", {}, "Not confirmed yet: it rolls back unless you confirm it (bar above). ") : null,
-      lock.state === "lifting" ? "It is being lifted now." : "It lifts itself when the timer ends.",
-    );
+  if (kind === "lockdown") {
     if (lock._deadlineMs) {
       clock = h("div", { class: "posture-clock" }, h("span", { class: "t" }, countdown(lock._deadlineMs)), h("span", { class: "l" }, "until it lifts by itself"));
     }
@@ -81,24 +46,25 @@ function band() {
       ["Renewed", lock.renew_count ? `${lock.renew_count} time${lock.renew_count === 1 ? "" : "s"}` : null],
       ["Mode underneath", POSTURE_TEXT[mode.effective_mode]],
     );
-    if (!lock.external_timer_armed) {
-      notes.push("The operating-system timer that lifts this lockdown even if PortLock stops is not armed.");
-    }
   }
 
   facts.push(["Policy", `${status.policy.name} (${plural(status.policy.rules, "rule", "rules")}, ${status.policy.source})`]);
-  if (kind !== "lockdown") facts.push(["Detection", status.backend.name], ["Can block devices", enforcer ? (enforcer.block ? "yes" : "no") : "unknown"]);
+  if (kind === "watch_only") {
+    facts.push(["Detection", status.backend.name], ["Can block devices", "no, never in this process"]);
+  } else if (kind !== "lockdown") {
+    facts.push(["Detection", status.backend.name], ["Can block devices", enforcer ? (enforcer.block ? "yes" : "no") : "unknown"]);
+  }
 
   return h(
     "section",
     { class: "posture", "data-state": kind, "aria-label": "Protection state" },
     h(
       "ol",
-      { class: "ladder", "aria-label": "Monitor, then Enforce, then Lockdown" },
-      LADDER.map((name) => h("li", { "aria-current": name === kind ? "true" : null }, POSTURE_TEXT[name])),
+      { class: "ladder", "aria-label": kind === "watch_only" ? "Watch-only: no other state can be reached here" : "Monitor, then Enforce, then Lockdown" },
+      copy.ladder.map((rung) => h("li", { "aria-current": rung.current ? "true" : null }, rung.label)),
     ),
-    h("div", { class: "posture-grid" }, h("div", {}, h("h2", { class: "posture-headline" }, headline), h("p", { class: "posture-sub" }, sub)), clock),
-    notes.map((text) => h("p", { class: "note warn" }, text)),
+    h("div", { class: "posture-grid" }, h("div", {}, h("h2", { class: "posture-headline" }, copy.headline), h("p", { class: "posture-sub" }, sub)), clock),
+    copy.notes.map((note) => h("p", { class: note.tone ? `note ${note.tone}` : "note" }, note.text)),
     h(
       "dl",
       { class: "posture-facts" },

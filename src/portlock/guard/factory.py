@@ -12,10 +12,14 @@ not import the Windows package and the other way round.
 * :func:`create_external_timer` and :func:`create_dir_privacy` build the dead-man timer
   (DESIGN 14.16) and the directory-privacy seam (14.18) for the platform;
   :func:`dead_man_command` is the command the timer runs.
+  :class:`SystemSeams` replaces individual seams those real objects are built on (tests).
+  A watch-only process (``guard.watchonly``, DESIGN 14.28) never calls these: the
+  composition root gives it inert stand-ins instead.
 * :func:`doctor` reports, without changing anything, whether this process is privileged,
   which mechanisms are available (with the reason when not), whether
   ``usbcore.authorized_default=0`` is on the Linux kernel command line, and whether the
-  state and configuration directories are private.
+  state and configuration directories are private. For a watch-only process it builds
+  no enforcer and no directory-privacy check, and runs no command.
 """
 
 from __future__ import annotations
@@ -42,16 +46,23 @@ from portlock.guard.base import (
 )
 from portlock.guard.safety import RefusalCallback, SafeEnforcer, SafetyContext
 from portlock.guard.seams import (
+    BlockIO,
+    CfgMgrAPI,
     CommandRunner,
     DirPrivacy,
+    DiskIO,
     ExternalTimer,
     IcaclsDirPrivacy,
     MechanismStatus,
     PosixDirPrivacy,
+    RegistryIO,
+    RuleFileIO,
     ScheduledTaskTimer,
     SubprocessRunner,
+    SysfsIO,
     SystemdRunTimer,
 )
+from portlock.guard.watchonly import NO_ANTIVIRUS_NOTE, Posture, WatchOnlyEnforcer
 
 __all__ = [
     "DEAD_MAN_TIMER",
@@ -62,6 +73,7 @@ __all__ = [
     "DoctorCheck",
     "DoctorReport",
     "Guard",
+    "SystemSeams",
     "create_backend",
     "create_dir_privacy",
     "create_enforcer",
@@ -125,16 +137,42 @@ def create_backend(config: Config, *, clock: Clock, platform: str | None = None)
     return LinuxBackend(clock=clock, poll_interval=config.polling_interval_seconds)
 
 
+@dataclass(frozen=True, slots=True)
+class SystemSeams:
+    """Replacements for the operating-system seams the real platform objects are built on.
+
+    ``None`` fields mean the real seam. Tests pass seams that record or raise, so that the
+    real composition (``service.daemon``) can be exercised while proving which seams it
+    reaches: an enforcing process reaches them, a watch-only one none of them.
+
+    Attributes:
+        runner: runs ``icacls``, ``schtasks``, ``systemd-run``, ``udevadm``.
+        registry / cfgmgr / disks: the Windows registry, device and disk calls.
+        sysfs / block / rules: the Linux sysfs, block-device and udev-rule access.
+        is_admin: whether the process may use the mechanisms.
+    """
+
+    runner: CommandRunner | None = None
+    registry: RegistryIO | None = None
+    cfgmgr: CfgMgrAPI | None = None
+    disks: DiskIO | None = None
+    sysfs: SysfsIO | None = None
+    block: BlockIO | None = None
+    rules: RuleFileIO | None = None
+    is_admin: Callable[[], bool] | None = None
+
+
 def create_enforcer(
     config: Config,
     *,
     platform: str | None = None,
     write_ahead: Callable[[JournalEntry], None] | None = None,
+    seams: SystemSeams | None = None,
 ) -> Enforcer:
     """The **raw** enforcer for the platform, wired to the real operating system.
 
     Callers wrap it in :class:`~portlock.guard.safety.SafeEnforcer` before any call;
-    :func:`create_guard` does that.
+    :func:`create_guard` does that. ``seams`` replaces individual operating-system seams.
 
     Raises:
         BackendError: for an unsupported platform.
@@ -144,10 +182,45 @@ def create_enforcer(
     if family == _WINDOWS:
         from portlock.guard.windows.enforce import WindowsEnforcer
 
-        return WindowsEnforcer.system(write_ahead=write_ahead)
+        if seams is None:
+            return WindowsEnforcer.system(write_ahead=write_ahead)
+        from portlock.guard.seams import (
+            WinCfgMgr,
+            WinDisks,
+            WinRegistry,
+            current_process_privileged,
+        )
+
+        return WindowsEnforcer(
+            cfgmgr=seams.cfgmgr if seams.cfgmgr is not None else WinCfgMgr(),
+            registry=seams.registry if seams.registry is not None else WinRegistry(),
+            disks=seams.disks if seams.disks is not None else WinDisks(),
+            is_admin=seams.is_admin if seams.is_admin is not None else current_process_privileged,
+            write_ahead=write_ahead,
+        )
     from portlock.guard.linux.enforce import LinuxEnforcer
 
-    return LinuxEnforcer.system(write_ahead=write_ahead)
+    if seams is None:
+        return LinuxEnforcer.system(write_ahead=write_ahead)
+    from portlock.guard.seams import (
+        RealBlockIO,
+        RealRuleFiles,
+        RealSysfs,
+        current_process_privileged,
+    )
+
+    return LinuxEnforcer(
+        sysfs=seams.sysfs if seams.sysfs is not None else RealSysfs(),
+        block=seams.block if seams.block is not None else RealBlockIO(),
+        rules=seams.rules if seams.rules is not None else RealRuleFiles(),
+        runner=(
+            seams.runner
+            if seams.runner is not None
+            else SubprocessRunner(env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"})
+        ),
+        is_root=seams.is_admin if seams.is_admin is not None else current_process_privileged,
+        write_ahead=write_ahead,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +491,7 @@ def doctor(
     dir_privacy: DirPrivacy | None = None,
     kernel_cmdline: Callable[[], str] | None = None,
     system_ids: Callable[[Sequence[UsbDevice]], frozenset[str]] | None = None,
+    posture: Posture | None = None,
 ) -> DoctorReport:
     """Report what PortLock can do on this machine. Never raises; changes nothing.
 
@@ -427,7 +501,14 @@ def doctor(
     defaults to :func:`system_instance_ids` only when the backend was created here: with
     an injected backend the system-volume check needs an injected probe.
 
-    Checks, in order: ``guard.platform``, ``guard.privilege``, ``guard.backend``,
+    ``posture`` (``guard.watchonly``) adds two plain lines, ``guard.watch_only`` and
+    ``guard.directories``. For a watch-only posture no enforcer and no directory-privacy
+    seam is created: the enforcement mechanisms and the directory permissions are
+    reported as not probed, and no command (``icacls``) is run. Any other posture is
+    probed in full, as without one.
+
+    Checks, in order: ``guard.watch_only`` and ``guard.directories`` (with a posture),
+    ``guard.platform``, ``guard.privilege``, ``guard.backend``,
     ``guard.detect``, ``guard.enumerate``, ``guard.block``, ``guard.read_only``,
     ``guard.eject``, ``guard.default_deny``, ``guard.baseline_read_only``,
     ``guard.conflicts``, ``guard.system_volume``, ``guard.boot_default_deny`` (Linux
@@ -436,6 +517,9 @@ def doctor(
     """
     checks: list[DoctorCheck] = []
     scrub = _Scrubber()
+    inert = posture is not None and posture.watch_only
+    if posture is not None:
+        checks.extend(_posture_checks(config, posture))
     name = sys.platform if platform is None else platform
     family: str | None
     try:
@@ -452,6 +536,9 @@ def doctor(
             backend = create_backend(config, clock=clock, platform=name)
         except Exception as exc:
             checks.append(_failure("guard.backend", "the device backend cannot be created", exc))
+    if enforcer is None and posture is not None and inert:
+        # Watch-only: the platform enforcer is never built, not even to be asked.
+        enforcer = WatchOnlyEnforcer(elevated=posture.elevated)
     if enforcer is None and family is not None:
         try:
             enforcer = create_enforcer(config, platform=name)
@@ -529,6 +616,15 @@ def doctor(
 
     by_role = {status.role: status for status in mechanisms}
     for check_id, role in _ROLES:
+        if inert:
+            checks.append(
+                DoctorCheck(
+                    check_id,
+                    STATUS_INFO,
+                    f"{role}: not probed (watch-only never touches enforcement mechanisms)",
+                )
+            )
+            continue
         checks.append(
             _mechanism_check(check_id, role, by_role.get(role), enforcer_caps, privileged)
         )
@@ -550,7 +646,7 @@ def doctor(
     if family == _LINUX:
         checks.append(_boot_check(kernel_cmdline))
     privacy = dir_privacy
-    if privacy is None and family is not None:
+    if privacy is None and family is not None and not inert:
         try:
             privacy = create_dir_privacy(platform=name)
         except Exception as exc:
@@ -559,6 +655,16 @@ def doctor(
         ("guard.state_dir", "state directory", config.paths.state_dir),
         ("guard.config_dir", "configuration directory", config.paths.config_dir),
     ):
+        if inert:
+            checks.append(
+                DoctorCheck(
+                    check_id,
+                    STATUS_INFO,
+                    f"the {label} was not checked for privacy: watch-only neither checks nor"
+                    " changes directory permissions",
+                )
+            )
+            continue
         checks.append(_privacy_check(check_id, label, Path(path), privacy))
 
     scrubbed = tuple(
@@ -576,6 +682,39 @@ def doctor(
             dataclasses.replace(status, reason=scrub(status.reason)) for status in mechanisms
         ),
     )
+
+
+def _posture_checks(config: Config, posture: Posture) -> list[DoctorCheck]:
+    """The two plain lines a person reads first: watch-only or not, and where."""
+    reason = posture.refusal()
+    if reason is not None:
+        mode = DoctorCheck(
+            "guard.watch_only",
+            STATUS_INFO,
+            "watch-only: PortLock shows and records your USB devices and changes nothing on"
+            " this computer outside its own folder; nothing is blocked, ejected or made"
+            " read-only, and no command is run",
+            f"{reason} {NO_ANTIVIRUS_NOTE[0].upper()}{NO_ANTIVIRUS_NOTE[1:]}.",
+        )
+    else:
+        mode = DoctorCheck(
+            "guard.watch_only",
+            STATUS_INFO,
+            "not watch-only: this process runs as administrator with system-wide directories,"
+            " so it uses the enforcement mechanisms below (in monitor mode it blocks only an"
+            " engaged lockdown)",
+        )
+    where = (
+        "system-wide directories"
+        if posture.system_wide
+        else "directories that are not system-wide (this user's own, or not provably local)"
+    )
+    directories = DoctorCheck(
+        "guard.directories",
+        STATUS_INFO,
+        f"{where}: state in {config.paths.state_dir}, configuration in {config.paths.config_dir}",
+    )
+    return [mode, directories]
 
 
 def _failure(check_id: str, summary: str, exc: Exception) -> DoctorCheck:

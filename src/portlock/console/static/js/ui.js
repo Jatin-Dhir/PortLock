@@ -4,12 +4,14 @@
 import { ApiError } from "./api.js";
 import { frag, h, replace, uid } from "./dom.js";
 import { count } from "./fmt.js";
+import { state } from "./store.js";
 import {
   ACCESS_TEXT,
   SCAN_TEXT,
   STATE_TEXT,
   TIER_TEXT,
   enforcementTruth,
+  isWatchOnly,
 } from "./truth.js";
 
 // ---- chips ------------------------------------------------------------------------------
@@ -63,13 +65,13 @@ export function verdictChip(verdict) {
 
 /** The enforcement column: what the operating system was really made to do. */
 export function enforcementCell(conn) {
-  const truth = enforcementTruth(conn);
+  const truth = enforcementTruth(conn, { watchOnly: isWatchOnly(state.status) });
   let badge;
   if (truth.kind === "real") {
     const tone = truth.headline === "Blocked" ? "c-deny" : truth.headline === "Read-only" ? "c-readonly" : "c-allow";
     badge = chip(truth.headline, tone);
   } else if (truth.kind === "intended") {
-    badge = chip(truth.headline, "c-watch", { dashed: true, title: "Monitor mode: this is what enforce mode would do" });
+    badge = chip(truth.headline, "c-watch", { dashed: true, title: truth.title });
   } else if (truth.kind === "protected") {
     badge = chip(truth.headline, "c-watch");
   } else {
@@ -112,6 +114,19 @@ export function button(label, { tone = "", small = false, onClick, disabled = fa
     });
   }
   return el;
+}
+
+/**
+ * The plain reason a control cannot be used, shown beside it and tied to it with
+ * `aria-describedby`, so nobody has to hover over a disabled button to learn why.
+ * Returns null when there is no reason, so it can sit in a children list.
+ */
+export function reasonFor(control, text) {
+  if (!text) return null;
+  const id = uid("why");
+  const described = control.getAttribute("aria-describedby");
+  control.setAttribute("aria-describedby", described ? `${described} ${id}` : id);
+  return h("p", { class: "hint why-not", id }, text);
 }
 
 /** A labelled control. `control` must be one element; it gets the label's `for`. */

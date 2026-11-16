@@ -117,7 +117,13 @@ export function mountSignin({ ping, problem, notice, onSignedIn, retry }) {
     h("p", { class: "muted" }, "Sign in to the console on this machine."),
     notice ? h("p", { class: "note warn", role: "status" }, notice) : null,
     ping && ping.setup_required
-      ? h("p", { class: "note bad" }, "PortLock has no administrator yet. Run `portlock init` on this machine first; nobody can sign in until then.")
+      ? h(
+          "div",
+          { class: "note bad stack" },
+          h("p", {}, "PortLock has no administrator account yet, so nobody can sign in. Create one on this computer first:"),
+          h("p", {}, h("code", {}, "portlock init"), " if PortLock is installed, or ", h("code", {}, "python -m portlock init"), " from PortLock's ", h("code", {}, "src"), " folder."),
+          h("p", {}, "Use the same kind of window that started this service: an ordinary one for the watch-only PortLock, an administrator one for a system-wide installation."),
+        )
       : null,
     slot,
     h("p", { class: "hint" }, ping ? `Service ${ping.version}, API ${ping.api}. This page loads nothing from any other host.` : ""),

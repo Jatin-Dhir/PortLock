@@ -26,6 +26,7 @@ from typing import Any
 from portlock.core.models import DeviceEvent, UsbDevice
 
 __all__ = [
+    "STAND_IN_MECHANISMS",
     "Action",
     "BackendCapabilities",
     "DeviceBackend",
@@ -39,6 +40,12 @@ __all__ = [
 ]
 
 EventCallback = Callable[[DeviceEvent], None]
+
+#: ``EnforcementResult.mechanism`` values of a result that stands in for a call that was
+#: never made: ``dry-run`` (monitor mode's dry run, ``guard.safety``) and ``watch-only``
+#: (``guard.watchonly``). Such a result says what *would* happen; it never proves that the
+#: operating system is now in the requested state, even when ``ok`` is True.
+STAND_IN_MECHANISMS = frozenset({"dry-run", "watch-only"})
 
 
 class Tier(enum.StrEnum):
@@ -183,6 +190,17 @@ class EnforcementResult:
     detail: str = ""
     undo: tuple[JournalEntry, ...] = ()
     error: str | None = None
+
+    @property
+    def performed(self) -> bool:
+        """True if the call succeeded *and* was really made to the operating system.
+
+        A stand-in result (:data:`STAND_IN_MECHANISMS`) is never performed, whatever its
+        ``ok`` says. Only a performed release may close a journal record or forget that
+        PortLock holds a device back: closing one on a stand-in's word would forget a
+        change that is still in place.
+        """
+        return self.ok and self.mechanism not in STAND_IN_MECHANISMS
 
     def to_dict(self) -> dict[str, Any]:
         return {

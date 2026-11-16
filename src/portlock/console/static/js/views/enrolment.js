@@ -6,6 +6,7 @@ import { api, seg } from "../api.js";
 import { h, replace } from "../dom.js";
 import { shortFp, timeEl, vidPid } from "../fmt.js";
 import { can, scope, state } from "../store.js";
+import { isWatchOnly } from "../truth.js";
 import { button, confirmDialog, empty, errorState, field, loading, pageHead, panel, select, table, textInput, toast } from "../ui.js";
 
 const INPUT = new Set(["keyboard", "mouse", "hid"]);
@@ -51,7 +52,9 @@ export function mount(root) {
                           onClick: async () => {
                             const ok = await confirmDialog({
                               title: "Remove this enrolment?",
-                              message: `${e.label || "This device"} will no longer be protected on port ${e.bus_path}. Policy will treat it like any other device, so it can be blocked.`,
+                              message: isWatchOnly(state.status)
+                                ? `${e.label || "This device"} will no longer be protected on port ${e.bus_path}. Policy will treat it like any other device. PortLock is watch-only on this computer, so nothing is blocked.`
+                                : `${e.label || "This device"} will no longer be protected on port ${e.bus_path}. Policy will treat it like any other device, so it can be blocked.`,
                               confirmLabel: "Remove enrolment",
                               tone: "danger",
                             });
@@ -113,7 +116,13 @@ export function mount(root) {
   const release = h(
     "div",
     { class: "panel-body" },
-    h("p", { class: "muted" }, "A port that sees too many arrivals in a short time is held blocked for a cool-down. If you are sure it is safe, release it early."),
+    h(
+      "p",
+      { class: "muted" },
+      isWatchOnly(state.status)
+        ? "A port that sees too many arrivals in a short time is held for a cool-down. PortLock is watch-only on this computer, so the port is not really blocked. If you are sure it is safe, release it early."
+        : "A port that sees too many arrivals in a short time is held blocked for a cool-down. If you are sure it is safe, release it early.",
+    ),
     h("div", { class: "row" }, field("Port", port), button("Release port", {
       disabled: !writer,
       onClick: async () => {

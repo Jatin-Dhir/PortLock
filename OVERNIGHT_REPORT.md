@@ -4,7 +4,7 @@ Branch `claude/overnight-security-framework`, 16 November 2026. `main` is untouc
 
 The short version: the repository held about 180 lines of Python that could not be
 imported. It now holds a complete device-control service (decision pipeline, enforcers
-for Linux and Windows, lockdown, audit, API, CLI, web console) that passes 5,883 tests.
+for Linux and Windows, lockdown, audit, API, CLI, web console) that passes 6,013 tests.
 **No enforcement mechanism has been run against a real device.** Everything that would
 change the operating system has only ever run against fakes.
 
@@ -86,14 +86,46 @@ change the operating system has only ever run against fakes.
   lock shared through the filesystem.
 - A policy pitfall: vendor id `8087` written as a number was read as decimal and silently
   never matched vendor `0x8087`. Ids must now be hex strings.
+- **The first watch-only design was wrong.** Three independent reviewers examined it. It
+  made *monitor mode* watch-only for every process and opened a gate when an administrator
+  switched to enforce. That broke administrators' system-wide installations in monitor
+  mode (their directories were never made private, and a lockdown was reported active
+  while nothing was blocked, and became real without its dead-man timer when the gate
+  opened), let the console say a lockdown blocked all removable storage when nothing was
+  blocked, started Microsoft Defender's command-line scanner from a watch-only process
+  when a drive was approved, and let a watch-only process close records of devices that
+  stayed blocked. The design was corrected to one rule decided once per process: a process
+  is watch-only exactly when it is not elevated or its directories are not system-wide, and
+  then it refuses enforce mode, a lockdown and default-deny, starts no antivirus program
+  and never closes a journal record on a result that changed nothing; every other process
+  behaves as before, in monitor mode too. The console now shows a watch-only bar on every
+  page and says "would" wherever nothing was applied.
+  The corrected design is held by `tests/unit/test_watch_only.py` (70 tests: among them
+  an ordinary user's start reaching no operating-system seam, the three refusals leaving
+  nothing behind, and an elevated system-wide process in monitor mode making its
+  directories private and engaging a real lockdown as before), by 17 tests that run the
+  console's own wording under Node, and by a live test that runs the real service under a
+  flight recorder on Windows and under WSL (`tests/hardware/test_watch_only_live.py`).
+- Found by running the real service: on Windows with Python 3.12 or older, Ctrl+C and
+  Ctrl+Break did not stop it, because the main thread sat in an untimed wait that a
+  signal cannot interrupt there. The wait is now cut into short pieces; a test sends a
+  real console break to a real process.
+- Found by the review's ordinary-user pass: a closed window left files that made the next
+  `stop` hang for 15 seconds and the next `run` exit a second after printing its address;
+  a mistyped password at the first `init` lost the audit verification key for good;
+  several messages named a `portlock` command that does not exist when running from the
+  source folder. All fixed, each with a test.
 
 ## 6. Tests executed and their results
 
 Run by the orchestrator on this machine, not just reported by the agents that wrote the code:
 
-- Windows 11, Python 3.12: **5,883 passed, 71 skipped**, 5 min 20 s.
-- Linux (WSL 2, Python 3.14): **5,864 passed, 90 skipped**, 3 min 42 s.
+- Windows 11, Python 3.12: **6,013 passed, 80 skipped**, 8 min 10 s (run beside other work).
+- Linux (WSL 2, Python 3.14): **5,995 passed, 99 skipped**, 5 min 12 s.
 - `ruff check` and `ruff format --check`: clean.
+- The opt-in live tests (`--run-hardware`; they read the real machine and change nothing):
+  the 9 watch-only service tests pass on Windows and under WSL, beside the 8 Windows and
+  5 Linux device tests that were there before.
 
 Skips are platform-specific tests (Windows-only, Linux-only) and tests marked `hardware`.
 The Linux run also skips tests that need the optional `cryptography` package, which is
@@ -116,9 +148,28 @@ had failed one test on Linux with Python 3.14; see section 5.
   script errors and no content-security-policy violations.
 - Device enumeration was run read-only on this Windows machine. Only counts were
   recorded; no real identifier is in the repository.
+- The real service was run in watch-only mode on one Windows machine (not elevated,
+  `python -m portlock init`, `run` and `stop` from `src`, throwaway `PORTLOCK_HOME`, a
+  non-default port), by the orchestrator, under a flight recorder that refuses and records
+  every program start, registry write and mutating seam call. It listed 5 real USB devices
+  (2 hubs, 1 mouse, 1 audio/video, 1 wireless; all 5 protected), answered on the event
+  stream and verified its audit chain. Asked for enforce mode, a lockdown and default-deny
+  it refused all three (`watch_only`); a console break stopped it with exit code 0. The
+  recorder saw no program start, no registry access, no mutating seam call, no file
+  written outside the throwaway directory and no socket other than `127.0.0.1`.
+- Run against the code as it was before (commit `d781c2a`), the same recorder caught
+  start-up calling `icacls` to change directory permissions, and a console request
+  reaching the scheduled-task timer. The recorder refused both, so nothing was changed.
+- The same run under WSL (no USB bus): the Linux backend started, the service answered,
+  the three requests were refused and SIGINT stopped it with exit code 0.
+- The console was opened in a browser against the real watch-only service: the watch-only
+  bar, "Watch-only: nothing is being blocked", and the enforce, default-deny and lockdown
+  controls disabled with the reason.
+- **Not done:** a device plugged in or removed while the real service runs.
 - **Not verified:** any enforcement mechanism on a real device; the generated systemd unit
   (never loaded by systemd); the Windows scheduled-task and `icacls` command lines (marked
-  UNVERIFIED in the code); `portlock doctor`, `run` and `status` on a real installation.
+  UNVERIFIED in the code); `portlock doctor`, `run` and `status` on an elevated,
+  system-wide installation.
 
 ## 8. Git commits created
 

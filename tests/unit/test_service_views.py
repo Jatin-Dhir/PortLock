@@ -168,6 +168,8 @@ def test_mode_settings_policy_and_doctor_views(harness: Harness) -> None:
         "killswitch": False,
         "can_enforce": True,
         "notes": [],
+        "watch_only": False,
+        "watch_only_reason": None,
     }
     settings = harness.service.get_settings().to_dict()
     assert settings["runtime"]["lockdown.default_minutes"] == 30

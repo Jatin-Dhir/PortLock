@@ -4,7 +4,8 @@
 import { api } from "../api.js";
 import { h, replace } from "../dom.js";
 import { shortFp, timeEl, vidPid } from "../fmt.js";
-import { can, scope } from "../store.js";
+import { can, scope, state } from "../store.js";
+import { blocksForReal, isWatchOnly } from "../truth.js";
 import {
   button,
   checkbox,
@@ -51,7 +52,9 @@ export function mount(root) {
   async function revoke(grant) {
     const ok = await confirmDialog({
       title: "Revoke this grant?",
-      message: "A connected device that depended on it is re-evaluated at once, and blocked if nothing else allows it.",
+      message: blocksForReal(state.status)
+        ? "A connected device that depended on it is re-evaluated at once, and blocked if nothing else allows it."
+        : `A connected device that depended on it is re-evaluated at once. Nothing is blocked: ${isWatchOnly(state.status) ? "PortLock is watch-only on this computer" : "PortLock is in monitor mode"}.`,
       confirmLabel: "Revoke",
       tone: "danger",
     });

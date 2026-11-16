@@ -62,21 +62,25 @@ from portlock.console.api import (
 from portlock.console.simulate import SCENARIOS, run_simulation
 from portlock.core.clock import Clock, SystemClock
 from portlock.core.config import (
+    HOME_ENV,
     AuditConfig,
     Config,
     config_to_toml,
     default_config,
     load_config,
+    paths_per_user,
 )
 from portlock.core.db import Database
 from portlock.core.errors import ConfigError, PortLockError
 from portlock.core.events import EventBus
 from portlock.core.fsutil import atomic_write_bytes, atomic_write_text, ensure_private_dir
+from portlock.core.privilege import process_elevated
 from portlock.core.service import AuditWriter
 from portlock.core.store import JOURNAL_FILE_NAME, RecoveryJournal
 from portlock.guard import factory
 from portlock.guard.base import DeviceBackend, Enforcer
 from portlock.guard.safety import SafeEnforcer, SafetyContext
+from portlock.guard.watchonly import Posture, detect_posture
 from portlock.lockdown.manager import ExternalTimer, recover
 from portlock.policy import (
     DEFAULT_POLICY,
@@ -125,6 +129,13 @@ _LOOPBACK_NAMES = frozenset({"localhost"})
 # --- the environment the command line reaches outside itself ----------------------------
 
 
+def _default_program() -> str:
+    """``python -m portlock`` when started that way (no installation), else ``portlock``."""
+    started = Path(sys.argv[0]) if sys.argv and sys.argv[0] else Path()
+    by_module = started.name == "__main__.py" and started.parent.name == "portlock"
+    return "python -m portlock" if by_module else "portlock"
+
+
 @dataclass(slots=True)
 class CliEnv:
     """Everything ``main`` touches outside its own arguments, replaceable in tests.
@@ -154,6 +165,11 @@ class CliEnv:
     create_timer: Callable[[Config], ExternalTimer] = factory.create_external_timer
     host_platform: str = sys.platform
     executable: tuple[str, ...] = ()
+    #: Whether this process is an administrator (root): decides between the system-wide
+    #: and the per-user default directories, and whether enforce mode is possible.
+    is_elevated: Callable[[], bool] = process_elevated
+    #: How the user started this program, for the commands it suggests.
+    program: str = field(default_factory=lambda: _default_program())
 
     def out(self) -> IO[str]:
         return self.stdout if self.stdout is not None else sys.stdout
@@ -270,6 +286,17 @@ def _audit_line(record: Mapping[str, Any]) -> str:
         f"{record.get('seq'):>6}  {_when(record.get('ts'))}  {record.get('severity')!s:<8} "
         f"{record.get('event_type')}  {record.get('actor') or '-'}{where}  {summary}"
     )
+
+
+def _aside(path: Path, clock: Clock) -> Path:
+    """A free name beside ``path`` to move it to; nothing is ever deleted."""
+    stamp = clock.now().strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{path.name}.unused-{stamp}")
+    counter = 1
+    while candidate.exists():
+        counter += 1
+        candidate = path.with_name(f"{path.name}.unused-{stamp}-{counter}")
+    return candidate
 
 
 def _is_loopback(host: str) -> bool:
@@ -471,7 +498,12 @@ class _Cli:
     def config(self, args: argparse.Namespace) -> Config:
         path = args.config or self.env.environ.get("PORTLOCK_CONFIG")
         try:
-            return load_config(path, env=self.env.environ, platform=self.env.host_platform)
+            return load_config(
+                path,
+                env=self.env.environ,
+                platform=self.env.host_platform,
+                elevated=self.env.is_elevated(),
+            )
         except ConfigError as exc:
             raise _Failure(EXIT_FAILED, f"configuration: {exc.message}") from None
 
@@ -608,7 +640,9 @@ class _Cli:
         state_dir = Path(config.paths.state_dir)
         db_path = Path(config.paths.database_file)
         if not db_path.exists() and not create:
-            raise _Failure(EXIT_FAILED, f"there is no database at {db_path}; run 'portlock init'")
+            raise _Failure(
+                EXIT_FAILED, f"there is no database at {db_path}; run '{self.env.program} init'"
+            )
         db = Database(db_path)
         try:
             initial_key: str | None = None
@@ -645,46 +679,85 @@ class _Cli:
     # --- init, run, stop, recover ----------------------------------------------------
 
     def cmd_init(self, args: argparse.Namespace) -> int:
+        """Set PortLock up: the first administrator, recovery codes, the audit key.
+
+        Nothing is created until an acceptable password is in hand, so a mistyped or
+        refused password leaves nothing behind that would cost the next ``init`` its
+        audit verification key.
+        """
         config = self.config(args)
+        prog = self.env.program
+        posture = self._posture(config)
+        for notice in self._installation_notices(config, posture):
+            self.say(notice)
         state_dir, config_dir = Path(config.paths.state_dir), Path(config.paths.config_dir)
-        ensure_private_dir(state_dir)
-        ensure_private_dir(config_dir)
         key_path = config.audit.hmac_key_file
         target = Path(args.config) if args.config else Path(config.paths.config_file)
-        notes: list[str] = []
-        if key_path is None:
-            if target.exists():
-                notes.append(
-                    f"{target} sets no audit.hmac_key_file, so the audit log is chained but "
-                    "carries no MACs. Add [audit] hmac_key_file = <path> and run 'portlock "
-                    "init' on a new state directory to get a verification key."
-                )
-            else:
-                key_path = state_dir / "audit.key"
-                config = dataclasses.replace(
-                    config, audit=AuditConfig(hmac_key_file=key_path, sinks=config.audit.sinks)
-                )
-                atomic_write_text(target, config_to_toml(config), private=False)
-                notes.append(f"wrote {target}")
-        local = self._open_local(config, initial=Path(key_path) if key_path else None, create=True)
+        lock = InstanceLock(state_dir / LOCK_FILE_NAME)
+        held = state_dir.is_dir() and lock.acquire()
         try:
-            if local.accounts.has_users():
+            if Path(config.paths.database_file).exists():
+                existing = self._open_local(config)
+                try:
+                    set_up = existing.accounts.has_users()
+                finally:
+                    existing.db.close()
+                if set_up:
+                    raise _Failure(
+                        EXIT_FAILED,
+                        "PortLock is already set up; init only creates the first administrator "
+                        f"(use '{prog} user reset-password NAME --local' for a lost password)",
+                    )
+            # A key store with no administrator was never handed over: its initial key was
+            # not shown (a failed init of an older PortLock, or `run` before `init`). It is
+            # set aside, never deleted, and a new one is made whose key is shown below.
+            stale_key = key_path is not None and Path(key_path).exists()
+            if stale_key and not held:
                 raise _Failure(
                     EXIT_FAILED,
-                    "PortLock is already set up; init only creates the first administrator "
-                    "(use 'portlock user reset-password NAME --local' for a lost password)",
+                    f"a PortLock service is running in {state_dir} without an administrator; "
+                    f"stop it first ('{prog} stop'), then run '{prog} init' again",
                 )
             name = (
                 args.username
                 or (self._ask("Administrator user name [admin]: ") if self.env.is_tty() else "")
                 or "admin"
             )
-            password = self._new_password(args, config, name)
-            user = local.accounts.create_user(name, password, Role.ADMIN, actor="local-console")
-            codes = local.accounts.generate_recovery_codes(user.username, actor="local-console")
-            initial_key = local.initial_key
+            password = self._new_password(args, config, name, again=f"{prog} init")
+            # From here on there is an acceptable password: create everything.
+            ensure_private_dir(state_dir)
+            ensure_private_dir(config_dir)
+            notes: list[str] = []
+            if key_path is None:
+                if target.exists():
+                    notes.append(
+                        f"{target} sets no audit.hmac_key_file, so the audit log is chained but "
+                        f"carries no MACs. Add [audit] hmac_key_file = <path> and run '{prog} "
+                        "init' on a new state directory to get a verification key."
+                    )
+                else:
+                    key_path = state_dir / "audit.key"
+                    config = dataclasses.replace(
+                        config, audit=AuditConfig(hmac_key_file=key_path, sinks=config.audit.sinks)
+                    )
+                    atomic_write_text(target, config_to_toml(config), private=False)
+                    notes.append(f"wrote {target}")
+            elif stale_key:
+                aside = _aside(Path(key_path), self.env.clock)
+                os.replace(key_path, aside)
+                notes.append(f"an audit key store whose key was never shown was moved to {aside}")
+            local = self._open_local(
+                config, initial=Path(key_path) if key_path else None, create=True
+            )
+            try:
+                user = local.accounts.create_user(name, password, Role.ADMIN, actor="local-console")
+                codes = local.accounts.generate_recovery_codes(user.username, actor="local-console")
+                initial_key = local.initial_key
+            finally:
+                local.db.close()
         finally:
-            local.db.close()
+            if held:
+                lock.release()
         self.say("PortLock is set up.")
         for note in notes:
             self.say(f"  {note}")
@@ -693,7 +766,7 @@ class _Cli:
             self.say("")
             self.say("Audit verification key. Keep it offline: it is shown only now.")
             self.say(f"  {initial_key}")
-            self.say("  Later: portlock audit verify --offline --key-file FILE (the key in FILE)")
+            self.say(f"  Later: {prog} audit verify --offline --key-file FILE (the key in FILE)")
         else:
             self.say("No audit verification key was shown (no new key store was created).")
         self.say("")
@@ -701,25 +774,150 @@ class _Cli:
         for code in codes:
             self.say(f"  {code}")
         self.say("")
+        self.say(f"State: {config.paths.state_dir}")
+        self.say(f"Configuration: {config.paths.config_dir}")
+        if posture.watch_only:
+            self.say(
+                "This PortLock is watch-only: it will show and record your USB devices and "
+                "change nothing on this computer outside its own folder."
+            )
+        self.say("")
         self.say("Next:")
-        self.say(
-            "  portlock run                    start the service (monitor mode: changes nothing)"
-        )
-        self.say("  portlock doctor                 what this machine can and cannot enforce")
-        self.say("  portlock enroll CONNECTION_ID   protect your own keyboard and mouse")
-        self.say("  portlock service print-unit     a hardened service definition to review")
+        self.say(f"  {prog} run      start PortLock and print the console address")
+        self.say(f"  {prog} doctor   what this machine can and cannot enforce")
+        self.say(f"  {prog} stop     stop it again (or press Ctrl+C where it runs)")
+        if not posture.watch_only:
+            self.say(f"  {prog} enroll CONNECTION_ID   protect your own keyboard and mouse")
+            self.say(f"  {prog} service print-unit     a hardened service definition to review")
         return EXIT_OK
 
-    def _new_password(self, args: argparse.Namespace, config: Config, name: str) -> str:
-        """A new password that satisfies the policy, asked for (twice) at a terminal."""
+    def _posture(self, config: Config) -> Posture:
+        """The watch-only posture of a service started with ``config`` by this user."""
+        return detect_posture(
+            config,
+            elevated=self.env.is_elevated(),
+            env=self.env.environ,
+            platform=self.env.host_platform,
+        )
+
+    def _installation_notices(self, config: Config, posture: Posture) -> list[str]:
+        """Plain words about which installation this window uses, before anything else."""
+        notices: list[str] = []
+        other = self._system_wide_elsewhere(config)
+        if other is not None:
+            notices.append(
+                f"Note: this computer also has a system-wide PortLock installation ({other}). "
+                "This window is not run as administrator, so this command uses a separate, "
+                f"per-user installation that only watches ({config.paths.state_dir}). To use "
+                "the system-wide one, open a window as administrator."
+            )
+        if self.env.is_elevated():
+            if posture.watch_only:
+                notices.append(
+                    "This window runs as administrator, but PortLock's files are in this "
+                    "user's own folders, so it stays watch-only and blocks nothing."
+                )
+            else:
+                notices.append(
+                    "This window runs as administrator, so this is the system-wide PortLock "
+                    f"installation ({config.paths.state_dir}), which can block USB devices. A "
+                    "window that is not run as administrator uses a separate, per-user "
+                    "installation that only watches."
+                )
+        return notices
+
+    def _system_wide_elsewhere(self, config: Config) -> Path | None:
+        """The system-wide installation an ordinary user is not using, if one exists."""
+        if self.env.is_elevated():
+            return None
+        environ = {
+            name: value for name, value in self.env.environ.items() if name.upper() != HOME_ENV
+        }
+        try:
+            system = default_config(platform=self.env.host_platform, env=environ, elevated=True)
+        except ConfigError:
+            return None
+        if Path(system.paths.state_dir) == Path(config.paths.state_dir):
+            return None
+        for candidate in (Path(system.paths.config_file), Path(system.paths.state_dir)):
+            with contextlib.suppress(OSError):
+                if candidate.exists():
+                    return candidate
+        return None
+
+    def _running(self, state_dir: Path) -> bool:
+        """True if a service holds this state directory's instance lock right now."""
+        lock_path = state_dir / LOCK_FILE_NAME
+        if not lock_path.is_file():
+            return False
+        probe = InstanceLock(lock_path)
+        if probe.acquire():
+            probe.release()
+            return False
+        return True
+
+    def _not_running(self, config: Config) -> _Failure:
+        message = "the service is not running"
+        other = self._system_wide_elsewhere(config)
+        if other is not None:
+            message += (
+                f" (in this user's installation, {config.paths.state_dir}). A system-wide "
+                f"installation exists in {other}: open a window as administrator to reach it"
+            )
+        return _Failure(EXIT_UNREACHABLE, message)
+
+    def _announce(self, runtime: Any, host: str, port: int) -> None:
+        """Print, once the service is up, what it is doing and where its console is."""
+        prog = self.env.program
+        if runtime.watch_only:
+            self.say(
+                "PortLock is running in WATCH-ONLY mode: it shows and records your USB "
+                "devices and changes nothing on this computer outside its own folder."
+            )
+        else:
+            mode = runtime.service.get_mode().effective_mode.value
+            self.say(f"PortLock is running in {mode} mode.")
+        has_users = True
+        with contextlib.suppress(PortLockError):
+            has_users = bool(runtime.accounts.has_users())
+        if port:
+            shown = f"[{host}]" if ":" in host else host
+            self.say("")
+            self.say(f"  Open the console in your web browser:  http://{shown}:{port}/")
+            self.say("")
+            if has_users:
+                self.say("  Sign in with the administrator name and password you chose at init.")
+        else:
+            self.say("  No console is listening.")
+        if not has_users:
+            self.say(
+                f"  No administrator exists yet: run '{prog} init' in another window first, "
+                "then sign in with the name and password you choose there."
+            )
+        self.say(f"  To stop it: press Ctrl+C here, or run '{prog} stop' in another window.")
+        with contextlib.suppress(OSError, ValueError):
+            self.env.out().flush()
+
+    def _new_password(
+        self, args: argparse.Namespace, config: Config, name: str, *, again: str
+    ) -> str:
+        """A new password that satisfies the policy, asked for (twice) at a terminal.
+
+        ``again`` is the command that tries once more; every refusal names it.
+        """
         minimum = config.auth.min_password_length
+        advice = (
+            f"nothing was changed. Run '{again}' again and choose a password of at least "
+            f"{minimum} characters that is not easy to guess (a few unrelated words work well)"
+        )
         for _attempt in range(3):
             password = self._secret(args, "New administrator password: ")
             problems = check_password_policy(password, min_length=minimum, username=name)
             if problems:
                 if args.password_stdin or not self.env.is_tty():
                     raise _Failure(
-                        EXIT_FAILED, "the password is not acceptable: " + "; ".join(problems)
+                        EXIT_FAILED,
+                        "the password is not acceptable: " + "; ".join(problems) + "; " + advice,
                     )
                 self.warn("That password is not acceptable: " + "; ".join(problems))
                 continue
@@ -727,19 +925,36 @@ class _Cli:
                 self.warn("The two entries differ.")
                 continue
             return password
-        raise _Failure(EXIT_FAILED, "no acceptable password was given")
+        raise _Failure(EXIT_FAILED, "no acceptable password was given; " + advice)
 
     def cmd_run(self, args: argparse.Namespace) -> int:
         config = self.config(args)
-        return int(
-            self.env.run_service(config, api_factory=api_factory, **dict(self.env.run_options))
-        )
+        posture = self._posture(config)
+        for notice in self._installation_notices(config, posture):
+            self.say(notice)
+        options = dict(self.env.run_options)
+        options.setdefault("announce", self._announce)
+        options.setdefault("elevated", self.env.is_elevated())
+        options.setdefault("env", self.env.environ)
+        options.setdefault("program", self.env.program)
+        options.setdefault("config_file", self._config_source(args, config))
+        return int(self.env.run_service(config, api_factory=api_factory, **options))
+
+    def _config_source(self, args: argparse.Namespace, config: Config) -> Path:
+        """The configuration file this command reads (or would read)."""
+        named = args.config or self.env.environ.get("PORTLOCK_CONFIG")
+        return Path(named) if named else Path(config.paths.config_file)
 
     def cmd_stop(self, args: argparse.Namespace) -> int:
         config = self.config(args)
         state_dir = Path(config.paths.state_dir)
+        if not self._running(state_dir):
+            # Nobody holds the instance lock: a runtime file is what a killed service left.
+            with contextlib.suppress(OSError):
+                (state_dir / RUNTIME_FILE_NAME).unlink()
+            raise self._not_running(config)
         if read_runtime_file(state_dir) is None:
-            raise _Failure(EXIT_UNREACHABLE, "the service is not running")
+            raise _Failure(EXIT_UNREACHABLE, "the service is still starting; try again in a moment")
         request_stop(state_dir)
         deadline = self.env.monotonic() + _STOP_WAIT_SECONDS
         while read_runtime_file(state_dir) is not None:
@@ -770,6 +985,18 @@ class _Cli:
                 what = "hold" if entry is None else f"{entry.kind} {entry.target}"
                 self.say(f"  {record.id}  {record.action.value:<16} {_text(what)}")
             return EXIT_OK
+        if paths_per_user(config.paths, platform=self.env.host_platform, env=self.env.environ):
+            # DESIGN 14.28: any program this user runs can write a per-user journal, and an
+            # elevated recover would apply it with the real enforcer. A per-user PortLock
+            # is watch-only and never changed anything, so there is nothing to recover.
+            raise _Failure(
+                EXIT_FAILED,
+                f"recover does not act on {state_dir}: it is in this user's own folders (or "
+                "not provably a system-wide location), which any program this user runs "
+                "could change, so its journal cannot be trusted with administrator rights. "
+                "A PortLock kept there is watch-only and never changed this computer. "
+                "Nothing was changed.",
+            )
         kill_switch = Path(config.paths.kill_switch_file)
         lock = InstanceLock(state_dir / LOCK_FILE_NAME)
         running = not lock.acquire()
@@ -788,7 +1015,8 @@ class _Cli:
             if not enforcer.capabilities().privileged:
                 raise _Failure(
                     EXIT_AUTH,
-                    "portlock recover needs administrator (root) rights; nothing was changed",
+                    f"'{self.env.program} recover' needs administrator (root) rights: run it "
+                    "in a window opened as administrator. Nothing was changed.",
                 )
             if not args.dead_man:
                 ensure_private_dir(kill_switch.parent)
@@ -850,7 +1078,7 @@ class _Cli:
             self.env.sleep(0.2)
         self.warn(
             "the service did not empty the journal in time: stop the PortLock process, then "
-            "run 'portlock recover' again"
+            f"run '{self.env.program} recover' again"
         )
         return EXIT_FAILED
 
@@ -908,6 +1136,11 @@ class _Cli:
     # --- status, doctor ----------------------------------------------------------------
 
     def cmd_status(self, args: argparse.Namespace) -> int:
+        if not (args.url or self.env.environ.get("PORTLOCK_URL")):
+            config = self.config(args)
+            if not self._running(Path(config.paths.state_dir)):
+                # No service holds the lock: a runtime file is a killed service's leftover.
+                raise self._not_running(config)
         with self.service(args, login=args.detail) as svc:
             ping = svc.ping
             detail = svc.call("GET", "/status") if args.detail else None
@@ -920,9 +1153,16 @@ class _Cli:
             if ping.get("simulation"):
                 self.say("  SIMULATION: this is a simulated machine, not a real one")
             if ping.get("setup_required"):
-                self.say("  no administrator exists yet: run 'portlock init'")
+                self.say(f"  no administrator exists yet: run '{self.env.program} init'")
             if data:
                 mode, lock, counts = data["mode"], data["lockdown"], data["counts"]
+                if mode.get("watch_only"):
+                    self.say(
+                        "  WATCH-ONLY: it shows and records, and changes nothing on this "
+                        "computer outside its own folder"
+                    )
+                    if mode.get("watch_only_reason"):
+                        self.say(f"  why: {_text(mode['watch_only_reason'])}")
                 self.say(
                     f"  mode: {mode['effective_mode']} (chosen {mode['mode']}, {mode['source']})"
                 )
@@ -954,7 +1194,11 @@ class _Cli:
                 self.warn(f"{exc.message}; checking this machine directly")
         if report is None:
             config = self.config(args)
-            report = factory.doctor(config, clock=self.env.clock).to_dict()
+            # A watch-only process has nothing to learn from probing the enforcement
+            # mechanisms, and probing on Windows runs icacls: the doctor skips it.
+            report = factory.doctor(
+                config, clock=self.env.clock, posture=self._posture(config)
+            ).to_dict()
 
         def render(data: Any) -> None:
             for check in data["checks"]:
@@ -1004,7 +1248,7 @@ class _Cli:
                 if waiting:
                     self.say(
                         f"{chr(10)}{len(waiting)} waiting for a decision: "
-                        "portlock approve ID | portlock deny ID"
+                        f"{self.env.program} approve ID | {self.env.program} deny ID"
                     )
 
         self.emit(args, data, render)
@@ -1451,8 +1695,8 @@ class _Cli:
             answer = self._ask("Keep it? Type yes to confirm: ").lower()
         else:
             self.say(
-                f"Confirm with: portlock confirm {change['id']}   "
-                f"(or: portlock cancel {change['id']})"
+                f"Confirm with: {self.env.program} confirm {change['id']}   "
+                f"(or: {self.env.program} cancel {change['id']})"
             )
             return
         if answer in ("yes", "y"):
@@ -1460,7 +1704,8 @@ class _Cli:
             self.say("Confirmed: the change is kept.")
         else:
             self.say(
-                f"Not confirmed: it rolls back by itself (or: portlock cancel {change['id']})."
+                "Not confirmed: it rolls back by itself "
+                f"(or: {self.env.program} cancel {change['id']})."
             )
 
     def cmd_lockdown(self, args: argparse.Namespace) -> int:
@@ -1513,7 +1758,8 @@ class _Cli:
         if len(changes) != 1:
             raise _Failure(
                 EXIT_FAILED,
-                f"{len(changes)} change(s) are waiting; name one (portlock changes lists them)",
+                f"{len(changes)} change(s) are waiting; name one "
+                f"({self.env.program} changes lists them)",
             )
         return str(changes[0]["id"])
 
@@ -1671,7 +1917,12 @@ class _Cli:
                 local.accounts.clear_lockout(args.name, actor="local-console")
                 self.say(f"unlocked {_text(args.name)}")
             else:
-                password = self._new_password(args, config, args.name)
+                password = self._new_password(
+                    args,
+                    config,
+                    args.name,
+                    again=f"{self.env.program} user reset-password {args.name} --local",
+                )
                 local.accounts.set_password(args.name, password, actor="local-console")
                 self.say(f"the password of {_text(args.name)} was changed; every session ended")
         except PortLockError as exc:
@@ -1954,7 +2205,7 @@ def main(argv: Sequence[str] | None = None, *, env: CliEnv | None = None) -> int
         args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
     except _UsageError as exc:
         err.write(f"portlock: {_text(exc)}\n")
-        err.write("Run 'portlock --help' for the commands.\n")
+        err.write(f"Run '{environment.program} --help' for the commands.\n")
         return EXIT_USAGE
     except _Exit as exc:
         return exc.code

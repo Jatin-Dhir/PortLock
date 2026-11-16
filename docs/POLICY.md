@@ -73,7 +73,8 @@ and the policy `default` exists for exactly that.
 | `scan` | `none`, `on_mount`, `required` (below) | `none` |
 | `alert` | `true` raises an alert whenever this action applies | `false` |
 
-`pending` means blocked until an administrator decides. It is the only outcome a grant
+`pending` means held until an administrator decides: blocked in enforce mode, recorded as
+"would block" in monitor mode and in a watch-only process. It is the only outcome a grant
 acts on (section 6).
 
 What `scan` means:
@@ -504,7 +505,9 @@ scans are clean.
 - **A scan is a point in time.** It finds bad files on an honest device. A hostile device
   can serve different content after it has been scanned (`SCANNING.md`).
 - **Policy decides; it does not enforce.** A `deny` is only as good as the enforcement
-  mechanism available on the machine, and in `monitor` mode nothing is enforced at all.
+  mechanism available on the machine. In `monitor` mode no policy decision is enforced
+  (only an engaged lockdown blocks, in a system-wide service), and a watch-only process
+  (`OPERATIONS.md` section 0) enforces nothing at all.
 - **Time windows use the service's clock** and a fixed UTC offset. Expiries are checked
   against the later of the clock and the newest audit record (`DESIGN.md` 14.12), but
   someone who can set the system clock forward can still open a window early.

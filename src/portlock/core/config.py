@@ -19,8 +19,13 @@ Where the directories come from, highest precedence first:
 
 1. ``paths.state_dir`` / ``paths.config_dir`` set in the configuration file;
 2. the ``PORTLOCK_HOME`` environment variable: ``<home>/state`` and ``<home>/config``;
-3. the operating-system default: ``%ProgramData%/PortLock`` on Windows (both
-   directories), ``/var/lib/portlock`` and ``/etc/portlock`` elsewhere.
+3. for an elevated process (administrator or root; the caller says which), the
+   system-wide default: ``%ProgramData%/PortLock`` on Windows (both directories),
+   ``/var/lib/portlock`` and ``/etc/portlock`` elsewhere;
+4. for an ordinary user, a per-user default: ``%LOCALAPPDATA%/PortLock/state`` and
+   ``.../config`` on Windows, ``$XDG_STATE_HOME/portlock`` and ``$XDG_CONFIG_HOME/portlock``
+   (``~/.local/state`` and ``~/.config`` when unset) elsewhere. A per-user installation
+   is watch-only: :func:`paths_per_user` tells the guard layer so.
 """
 
 from __future__ import annotations
@@ -29,7 +34,9 @@ import contextlib
 import difflib
 import ipaddress
 import math
+import ntpath
 import os
+import posixpath
 import re
 import sys
 import tomllib
@@ -67,6 +74,7 @@ __all__ = [
     "config_to_toml",
     "default_config",
     "load_config",
+    "paths_per_user",
 ]
 
 #: Environment variable that relocates both directories under one home.
@@ -514,21 +522,32 @@ class Config:
         }
 
 
-def default_config(platform: str | None = None, env: Mapping[str, str] | None = None) -> Config:
+def default_config(
+    platform: str | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    elevated: bool = True,
+) -> Config:
     """The configuration PortLock runs with when there is no configuration file.
 
     Args:
         platform: a ``sys.platform`` value; ``"win32"`` selects the Windows layout and
             anything else the POSIX one. Defaults to the running platform.
-        env: environment variables to consult (``PORTLOCK_HOME``, and ``ProgramData`` on
-            Windows). Defaults to the process environment.
+        env: environment variables to consult (``PORTLOCK_HOME``, ``ProgramData``,
+            ``LOCALAPPDATA``, ``USERPROFILE``, ``HOME``, ``XDG_STATE_HOME``,
+            ``XDG_CONFIG_HOME``). Defaults to the process environment.
+        elevated: whether the process that will use the directories is an administrator
+            (root). ``True`` gives the system-wide directories, ``False`` the per-user
+            ones. This module never asks the machine; the command line does
+            (``core.privilege``) and passes the answer.
 
     Raises:
-        ConfigError: if ``PORTLOCK_HOME`` (or ``ProgramData``) is set to a relative path.
+        ConfigError: if ``PORTLOCK_HOME`` (or another variable consulted) is a relative
+            path, or no per-user directory can be found.
     """
     resolved_platform = sys.platform if platform is None else platform
     resolved_env = os.environ if env is None else env
-    return Config(paths=_default_paths(resolved_platform, resolved_env))
+    return Config(paths=_default_paths(resolved_platform, resolved_env, elevated=elevated))
 
 
 def load_config(
@@ -536,6 +555,7 @@ def load_config(
     *,
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
+    elevated: bool = True,
 ) -> Config:
     """Read and validate a TOML configuration file.
 
@@ -548,6 +568,8 @@ def load_config(
             the defaults are returned.
         env: environment variables to consult; defaults to the process environment.
         platform: a ``sys.platform`` value; defaults to the running platform.
+        elevated: system-wide (``True``) or per-user (``False``) default directories;
+            see :func:`default_config`.
 
     Raises:
         InvalidConfigError: if the file parses but its content is invalid. Unknown keys,
@@ -558,7 +580,7 @@ def load_config(
     """
     resolved_platform = sys.platform if platform is None else platform
     resolved_env = os.environ if env is None else env
-    defaults = default_config(resolved_platform, resolved_env)
+    defaults = default_config(resolved_platform, resolved_env, elevated=elevated)
 
     explicit = path is not None
     source = Path(path) if path is not None else defaults.paths.config_file
@@ -758,7 +780,7 @@ def _flavour(platform: str) -> type[PurePath]:
     return PureWindowsPath if _is_windows(platform) else PurePosixPath
 
 
-def _default_paths(platform: str, env: Mapping[str, str]) -> PathsConfig:
+def _default_paths(platform: str, env: Mapping[str, str], *, elevated: bool) -> PathsConfig:
     flavour = _flavour(platform)
     home = env.get(HOME_ENV, "")
     if home.strip():
@@ -770,10 +792,156 @@ def _default_paths(platform: str, env: Mapping[str, str]) -> PathsConfig:
         return PathsConfig(
             state_dir=Path(str(base / "state")), config_dir=Path(str(base / "config"))
         )
+    if not elevated:
+        return _per_user_paths(platform, env)
     if _is_windows(platform):
         root = flavour(_program_data(env)) / "PortLock"
         return PathsConfig(state_dir=Path(str(root)), config_dir=Path(str(root)))
     return PathsConfig(state_dir=Path("/var/lib/portlock"), config_dir=Path("/etc/portlock"))
+
+
+def _per_user_paths(platform: str, env: Mapping[str, str]) -> PathsConfig:
+    """The directories an ordinary user's PortLock uses (watch-only)."""
+    if _is_windows(platform):
+        local = _env_path(env, "LOCALAPPDATA", PureWindowsPath)
+        if local is None:
+            profile = _env_path(env, "USERPROFILE", PureWindowsPath)
+            if profile is None:
+                raise ConfigError(
+                    "no per-user directory was found (LOCALAPPDATA and USERPROFILE are unset);"
+                    f" set {HOME_ENV} to an absolute directory"
+                )
+            local = profile / "AppData" / "Local"
+        root = local / "PortLock"
+        return PathsConfig(
+            state_dir=Path(str(root / "state")), config_dir=Path(str(root / "config"))
+        )
+    user_home = _env_path(env, "HOME", PurePosixPath)
+    # XDG base directories that are not absolute are invalid and ignored (the XDG Base
+    # Directory specification says so), so the documented fallbacks apply.
+    state_home = _env_path(env, "XDG_STATE_HOME", PurePosixPath)
+    config_home = _env_path(env, "XDG_CONFIG_HOME", PurePosixPath)
+    if state_home is None or config_home is None:
+        if user_home is None:
+            raise ConfigError(
+                f"no per-user directory was found (HOME is unset); set {HOME_ENV} to an"
+                " absolute directory"
+            )
+        state_home = state_home or user_home / ".local" / "state"
+        config_home = config_home or user_home / ".config"
+    return PathsConfig(
+        state_dir=Path(str(state_home / "portlock")), config_dir=Path(str(config_home / "portlock"))
+    )
+
+
+def _env_path(env: Mapping[str, str], name: str, flavour: type[PurePath]) -> PurePath | None:
+    """An absolute path from the environment, ``None`` when unset or not absolute.
+
+    The name is matched without case, because ``os.environ`` is case-insensitive on
+    Windows but a plain dict copy of it is not.
+    """
+    wanted = name.upper()
+    for key, value in env.items():
+        if key.upper() == wanted and value.strip():
+            candidate = flavour(value)
+            return candidate if candidate.is_absolute() else None
+    return None
+
+
+def paths_per_user(
+    paths: PathsConfig, *, platform: str | None = None, env: Mapping[str, str] | None = None
+) -> bool:
+    """True unless both directories are provably system-wide locations.
+
+    A directory is per-user when it lies inside the current user's own profile: on
+    Windows ``USERPROFILE``, ``LOCALAPPDATA`` and ``APPDATA`` (a profile whose application
+    data was redirected), elsewhere ``HOME`` unless it is ``/``. Such a directory belongs
+    to the user, and every program the user runs can change it, so it cannot hold the
+    state of an enforcing service: a process using it is watch-only (``guard.watchonly``).
+
+    Another spelling of the profile must not pass for a system-wide location. When
+    ``platform`` is the running system, both sides are resolved with
+    :func:`os.path.realpath` (8.3 short names, ``..``, junctions, symbolic links and
+    ``subst`` drives all resolve to the real profile). For a foreign ``platform`` (tests)
+    only the names are compared, after normalisation. It fails closed: a UNC or
+    device-namespace path (``\\\\server\\share``, ``\\\\?\\C:\\...``, ``\\\\.\\...``),
+    a relative path, or a profile variable that is set but empty, relative or
+    unresolvable makes the answer True.
+    """
+    resolved_platform = sys.platform if platform is None else platform
+    resolved_env = os.environ if env is None else env
+    windows = _is_windows(resolved_platform)
+    native = windows == (sys.platform == "win32")
+    roots: list[str] = []
+    for name in ("USERPROFILE", "LOCALAPPDATA", "APPDATA") if windows else ("HOME",):
+        value = _env_value(resolved_env, name, windows=windows)
+        if value is None:
+            continue
+        root = _comparable(value, windows=windows, native=native)
+        if root is None:
+            return True
+        if not windows and root == "/":
+            # Root's home is "/" on many systems: that is the whole disk, not a profile.
+            continue
+        roots.append(root)
+    for directory in (paths.state_dir, paths.config_dir):
+        # A POSIX path held in a Windows ``Path`` (tests on Windows) prints with
+        # backslashes; ``as_posix`` gives back the name as written.
+        text = str(directory) if windows else PurePath(directory).as_posix()
+        candidate = _comparable(text, windows=windows, native=native)
+        if candidate is None:
+            return True
+        if any(_within(candidate, root, windows=windows) for root in roots):
+            return True
+    return False
+
+
+def _env_value(env: Mapping[str, str], name: str, *, windows: bool) -> str | None:
+    """The raw value of an environment variable, ``None`` when it is not set at all.
+
+    On Windows the name is matched without case, because ``os.environ`` is
+    case-insensitive there but a plain dict copy of it is not.
+    """
+    if not windows:
+        return env.get(name)
+    wanted = name.upper()
+    for key, value in env.items():
+        if key.upper() == wanted:
+            return value
+    return None
+
+
+def _comparable(text: str, *, windows: bool, native: bool) -> str | None:
+    """``text`` as an absolute, normalised path string to compare, or ``None`` (fail closed)."""
+    if not text.strip() or "\x00" in text:
+        return None
+    if windows:
+        # UNC (\\server\share, also \\localhost\C$) and device namespaces (\\?\, \\.\)
+        # name the same disk in ways a prefix comparison cannot follow.
+        if text.replace("/", "\\").startswith("\\\\"):
+            return None
+        if not PureWindowsPath(text).is_absolute():
+            return None
+    elif not PurePosixPath(text).is_absolute():
+        return None
+    if native:
+        try:
+            resolved = os.path.realpath(text)
+        except (OSError, ValueError):
+            return None
+    else:
+        resolved = ntpath.normpath(text) if windows else posixpath.normpath(text)
+    if windows:
+        # realpath turns a mapped network drive into a UNC path: not provably local.
+        if resolved.replace("/", "\\").startswith("\\\\"):
+            return None
+        return ntpath.normcase(ntpath.normpath(resolved))
+    return posixpath.normpath(resolved)
+
+
+def _within(candidate: str, root: str, *, windows: bool) -> bool:
+    separator = "\\" if windows else "/"
+    return candidate == root or candidate.startswith(root.rstrip(separator) + separator)
 
 
 def _program_data(env: Mapping[str, str]) -> str:

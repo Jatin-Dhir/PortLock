@@ -188,6 +188,13 @@
   color: var(--text-3);
 }
 
+/* Why a control cannot be used, beside it: never only in a tooltip. */
+.hint.why-not {
+  flex: 1 1 18rem;
+  max-width: 62ch;
+  color: var(--text-2);
+}
+
 input[type="text"],
 input[type="password"],
 input[type="number"],

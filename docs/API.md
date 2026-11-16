@@ -146,6 +146,7 @@ Every error has the same body:
 | 409 | `killswitch_active` | enforcement is disabled by the kill-switch file | null |
 | 409 | `enforcement_unavailable` | this machine or process cannot enforce | null (the message says why) |
 | 409 | `not_private` | enforce mode is refused: the state or configuration directory is not private | null |
+| 409 | `watch_only` | this process is watch-only (DESIGN §14.28): enforce mode, a lockdown and turning default-deny on are refused, and nothing is left behind | null (the message is ModeInfo's `watch_only_reason`) |
 | 409 | `no_mounted_volume` / `scan_unavailable` / `scan_queue_full` | scan cannot be started | null |
 | 409 | `wrong_channel` | a pending change must be confirmed over the channel that made it | null |
 | 409 | `confirmation_expired` | the confirmation arrived after the deadline; the change was rolled back | null |
@@ -377,7 +378,22 @@ operating-system dead-man timer is set).
 
 `mode` (the chosen mode), `effective_mode` (what is in force), both `"monitor"` \|
 `"enforce"`; `source` (`"config"` \| `"setting"` \| `"killswitch"`); `killswitch` (bool);
-`can_enforce` (bool); `notes` (array<string>: why it cannot, if it cannot).
+`can_enforce` (bool); `notes` (array<string>: why it cannot, if it cannot);
+`watch_only` (bool); `watch_only_reason` (string \| null).
+
+`watch_only` is true for a process that can never be trusted to enforce: it is not
+elevated, or its state or configuration directory is not a system-wide location (DESIGN
+§14.28). It is decided when the process starts and never changes while it runs; the mode
+does not decide it. `watch_only_reason` then says, in one or two plain sentences, what
+PortLock cannot do here and why (for example "PortLock cannot change this computer: it is
+not running as administrator, and its files are in this user's own folders, which every
+program this user runs could change. It stays watch-only: it shows and records, and blocks
+nothing."); it is `null` when `watch_only` is false. In a watch-only process
+`effective_mode` is always `"monitor"`, `can_enforce` is false, and the same sentence is
+the message of every `watch_only` error. A console reads these two fields, and nothing
+else, to know whether the process is watch-only. An elevated process with system-wide
+directories is never watch-only, in monitor mode either: there `watch_only` is false and an
+engaged lockdown blocks (6.11).
 
 ### 4.14 `Status` (`core.service.ServiceStatus`)
 
@@ -392,7 +408,7 @@ operating-system dead-man timer is set).
 | `lockdown` | Lockdown |
 | `policy` | {`name`, `hash`, `source`: string, `rules`: int} |
 | `backend` | {`name`: string, `event_driven`, `healthy`: bool, `last_error`: string \| null, `notes`: array<string>} |
-| `enforcer` | {`name`: string, `privileged`, `block`, `read_only`, `eject`, `default_deny`: bool, `notes`: array<string>} |
+| `enforcer` | {`name`: string, `privileged`, `block`, `read_only`, `eject`, `default_deny`: bool, `notes`: array<string>}; in a watch-only process `name` is `"watch-only"` and the four capabilities are false |
 | `counts` | {`connected`, `protected`, `allowed`, `read_only`, `pending`, `denied`, `not_enforced`: int} |
 | `audit` | {`head_seq`: int, `head_hash`: string, `keyed`: bool, `backlog`: int, `sink_failures`: int} |
 | `journal` | {`open_records`, `corrupt_lines`: int} |
@@ -408,6 +424,25 @@ array<{`id`: string, `status`: `"ok"` \| `"warn"` \| `"fail"` \| `"info"`, `summ
 string, `detail`: string}>. The guard checks are `guard.*`, the service's are
 `service.*`. The report contains device counts only, never a serial number, a product name
 or an instance id.
+
+The guard checks, in order: `guard.watch_only` and `guard.directories` (the posture of a
+running service or of `portlock doctor`; `info`), `guard.platform`, `guard.privilege`,
+`guard.backend`, `guard.detect`, `guard.enumerate`, `guard.block`, `guard.read_only`,
+`guard.eject`, `guard.default_deny`, `guard.baseline_read_only`, `guard.conflicts`,
+`guard.system_volume`, `guard.boot_default_deny` (Linux only), `guard.state_dir`,
+`guard.config_dir`. The service's: `service.mode`, `service.killswitch`,
+`service.journal`, `service.database`, `service.audit`, `service.signing`,
+`service.scan_engines`, `service.lockdown`, `service.privacy`, then
+`service.system_volume` and `service.baseline_read_only` when they apply, and
+`service.setup`.
+
+In a watch-only process (4.13) no enforcement mechanism is probed and no command is run:
+`guard.watch_only` says watch-only, with the reason and that the antivirus engines are not
+used; `guard.block` to `guard.baseline_read_only`, `guard.state_dir`, `guard.config_dir`
+and `service.privacy` are `info` lines that say they were not probed or checked (never
+`ok`); `service.scan_engines` says in its `detail` that antivirus engines are not used in
+watch-only. In any other process `guard.watch_only` says it is not watch-only and every
+mechanism is probed.
 
 ### 4.16 `Settings`
 
@@ -644,7 +679,7 @@ characters>` the answer also carries `proof` (string), see 5.7.
 {"service": "portlock", "version": "0.2.0", "run_id": "9f2c4e1ab07d3355", "host_label": "unnamed-host",
  "platform": "linux", "started_at": "2026-01-01T08:59:00.000000Z", "uptime_seconds": 600, "simulation": false,
  "mode": {"mode": "enforce", "effective_mode": "enforce", "source": "setting", "killswitch": false,
-          "can_enforce": true, "notes": []},
+          "can_enforce": true, "notes": [], "watch_only": false, "watch_only_reason": null},
  "lockdown": {"state": "idle", "active": false, "engaged_at": null, "engaged_by": null, "reason": null,
               "expires_at": null, "remaining_seconds": null, "renew_count": 0, "default_minutes": 60,
               "max_minutes": 1440, "pending_change_id": null, "confirm_remaining_seconds": null,
@@ -1070,15 +1105,18 @@ Response: `scans` (array<Scan> without `report`), `next` (int \| null).
 
 **`POST /lockdown/engage` — `engage_lockdown`.** Blocks all removable storage and puts
 the OS into default-deny for new devices, **in monitor mode too**. Protected devices are
-never touched. It is applied at once **under commit-confirm** (DESIGN §14.15): it is
+never touched. A watch-only process (4.13) refuses it with 409 `watch_only`: the lockdown
+stays `idle` and nothing is recorded, so a lockdown is never `active` unless it really
+blocks. It is applied at once **under commit-confirm** (DESIGN §14.15): it is
 rolled back unless `POST /changes/{id}/confirm` arrives within `commit_confirm_seconds`
 (default 60) over the same channel (5.7), so an operator whose only way in is a USB network
 adapter gets the machine back. After confirmation it lifts itself at `expires_at` unless
 renewed. Request: `minutes` (int, 1–`max_minutes`, default `default_minutes`), `reason`
 (string, optional, at most 256 characters). Response 200: `lockdown` (Lockdown), `summary`
 ({`evaluated`, `changed`, `blocked`, `read_only`, `released`, `failed`: int}), `change`
-(Change, 4.17, with the devices it blocks in `preview`). Errors: 409 `lockdown_active` (use
-renew), `invalid_duration`, `killswitch_active`, `enforcement_unavailable`.
+(Change, 4.17, with the devices it blocks in `preview`). Errors: 409 `watch_only`,
+`lockdown_active` (use renew), `invalid_duration`, `killswitch_active`,
+`enforcement_unavailable`.
 
 ```json
 // request
@@ -1125,14 +1163,26 @@ the password is checked on the network channel and `locked_out` applies.
 ```
 
 If the service is not running, the lockdown is lifted with `portlock recover`, which
-needs operating-system administrator rights and no PortLock login.
+needs operating-system administrator rights and no PortLock login. `recover` refuses a
+per-user home: any program the user runs could have written its journal, and a PortLock
+kept there is watch-only and never changed anything.
 
 ### 6.12 Mode, scope, default-deny, doctor, settings
 
 **`GET /mode` — `view`.** Response: ModeInfo (4.13).
 
 ```json
-{"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": true, "notes": []}
+{"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": true, "notes": [],
+ "watch_only": false, "watch_only_reason": null}
+```
+
+In a watch-only process (4.13):
+
+```json
+{"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": false,
+ "notes": ["PortLock cannot change this computer: ...", "antivirus engines are not used in watch-only: ..."],
+ "watch_only": true,
+ "watch_only_reason": "PortLock cannot change this computer: it is not running as administrator, and its files are in this user's own folders, which every program this user runs could change. It stays watch-only: it shows and records, and blocks nothing."}
 ```
 
 **`PUT /mode` — `change_mode`.** Request: `mode` (`"monitor"` \| `"enforce"`). Switching
@@ -1140,13 +1190,21 @@ to `enforce` is applied at once under commit-confirm (6.13): the response carrie
 and the mode is rolled back unless it is confirmed in time; switching to `monitor` puts
 back everything PortLock changed (an active lockdown excepted) and has no `change`.
 Response 200: `mode` (ModeInfo), `summary` (as lockdown engage, or null), `change` (Change
-or null). Errors: 409 `killswitch_active`, `enforcement_unavailable`, `not_private`.
+or null). Errors: 409 `watch_only` (switching to `enforce` in a watch-only process; nothing
+is proposed or written, and switching to `monitor` stays allowed), `killswitch_active`,
+`enforcement_unavailable`, `not_private`.
+
+```json
+// PUT /mode {"mode": "enforce"} in a watch-only process: 409
+{"error": {"code": "watch_only", "message": "PortLock cannot change this computer: it is not running as administrator, ... It stays watch-only: it shows and records, and blocks nothing.", "details": null}}
+```
 
 ```json
 // request
 {"mode": "enforce"}
 // response 200
-{"mode": {"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": true, "notes": []},
+{"mode": {"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": true, "notes": [],
+          "watch_only": false, "watch_only_reason": null},
  "summary": null,
  "change": {"id": "5b0e9d1c7a3f4286", "kind": "enforce_mode", "status": "awaiting", "...": "a Change"}}
 ```
@@ -1166,16 +1224,19 @@ default-deny for new devices in enforce mode.
 
 **`PUT /default-deny` — `change_mode`.** Request: `enabled` (bool). Turning it on is
 applied under commit-confirm. Response 200: `enabled`, `summary`, `change`. Errors: 409
-`killswitch_active`.
+`watch_only` (turning it on in a watch-only process; nothing is proposed or written, and
+turning it off stays allowed), `killswitch_active`.
 
-**`GET /doctor` — `view`.** What this machine can do right now. Response: Doctor (4.15).
+**`GET /doctor` — `view`.** What this machine can do right now. Response: Doctor (4.15),
+whose first lines say whether this process is watch-only.
 
 ```json
 {"generated_at": "2026-01-01T09:00:00.000000Z", "platform": "linux", "version": "0.2.0", "worst": "warn",
  "backend": {"name": "linux", "event_driven": true, "healthy": true, "last_error": null, "notes": []},
  "enforcer": {"name": "linux", "privileged": true, "block": true, "read_only": true, "eject": true, "default_deny": true, "notes": []},
  "mechanisms": [],
- "checks": [{"id": "guard.privilege", "status": "ok", "summary": "running as administrator", "detail": ""},
+ "checks": [{"id": "guard.watch_only", "status": "info", "summary": "not watch-only: this process runs as administrator with system-wide directories, so it uses the enforcement mechanisms below (in monitor mode it blocks only an engaged lockdown)", "detail": ""},
+            {"id": "guard.privilege", "status": "ok", "summary": "running as administrator", "detail": ""},
             {"id": "guard.detect", "status": "ok", "summary": "arrivals are pushed by the operating system", "detail": ""},
             {"id": "guard.enumerate", "status": "ok", "summary": "4 USB device(s) connected", "detail": ""},
             {"id": "service.signing", "status": "warn", "summary": "audit records carry no MAC (no key store configured)", "detail": ""}]}

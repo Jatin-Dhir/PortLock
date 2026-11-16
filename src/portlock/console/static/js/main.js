@@ -9,9 +9,8 @@ import { count } from "./fmt.js";
 import { mountChangeBar } from "./changebar.js";
 import { mountSignin } from "./signin.js";
 import { loadAll, resetState, state, can, scope } from "./store.js";
+import { shellBanner } from "./truth.js";
 import { errorState, toast } from "./ui.js";
-
-const SIMULATION_TEXT = "SIMULATION: nothing real is read, blocked, ejected or changed on this machine. Every device here is synthetic.";
 
 const VIEWS = [
   { path: "overview", label: "Overview", module: "./views/overview.js" },
@@ -47,11 +46,25 @@ async function showSignin(notice) {
     problem = error;
   }
   document.title = "Sign in - PortLock";
-  replace(app, simulationBar(), mountSignin({ ping, problem, notice, onSignedIn: signedIn, retry: () => showSignin(notice) }));
+  replace(app, banner(), mountSignin({ ping, problem, notice, onSignedIn: signedIn, retry: () => showSignin(notice) }));
 }
 
-function simulationBar() {
-  return state.simulation ? h("div", { class: "simbar", role: "status" }, h("span", {}, SIMULATION_TEXT)) : null;
+/**
+ * The bar at the top of every page: the simulation's hazard stripes, or the watch-only
+ * statement, never both (truth.shellBanner decides). Before sign-in the mode is not known,
+ * so only the simulation bar can show there.
+ */
+function banner() {
+  const bar = shellBanner({ simulation: state.simulation, status: state.status });
+  if (!bar) return null;
+  if (bar.kind === "simulation") return h("div", { class: "simbar", role: "status" }, h("span", {}, bar.text));
+  return h(
+    "div",
+    { class: "wobar", role: "region", "aria-label": "Watch-only" },
+    h("strong", {}, bar.lead),
+    h("span", {}, bar.text),
+    h("span", { class: "why" }, `Why: ${bar.reason}`),
+  );
 }
 
 async function signedIn(reply) {
@@ -130,6 +143,9 @@ function buildShell() {
   const nav = h("ul", {});
   const main = h("main", { class: "main", id: "main", tabindex: "-1" });
   const changebar = h("div", { id: "changebar" });
+  // The bar is re-drawn only when what it says changes, so it is never re-announced.
+  const bannerHost = h("div", {}, banner());
+  let bannerKey = JSON.stringify(shellBanner({ simulation: state.simulation, status: state.status }));
 
   const links = VIEWS.filter((v) => !v.permission || can(v.permission)).map((view) => {
     const badge = h("span", { class: "badge", hidden: true });
@@ -144,7 +160,7 @@ function buildShell() {
     h(
       "div",
       { class: "app" },
-      simulationBar(),
+      bannerHost,
       h(
         "header",
         { class: "topbar" },
@@ -159,6 +175,12 @@ function buildShell() {
       h("div", { class: "shell" }, h("nav", { class: "rail", "aria-label": "Console sections" }, nav), main),
     ),
   );
+  s.on(["status", "mode"], () => {
+    const key = JSON.stringify(shellBanner({ simulation: state.simulation, status: state.status }));
+    if (key === bannerKey) return;
+    bannerKey = key;
+    replace(bannerHost, banner());
+  });
   s.on("live", () => {
     const text = { up: "Live", connecting: "Reconnecting", down: "Offline" }[state.live];
     live.dataset.live = state.live;

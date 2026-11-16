@@ -62,6 +62,22 @@ Demonstrated:
 - `portlock init`, `run`, `status`, `stop`, `recover --dry-run` and the offline audit
   verification were run by hand, unprivileged, against a temporary directory under WSL.
   `init`, offline verification and `simulate` were run on Windows.
+- The real service was run in watch-only mode on one Windows 11 machine, as an ordinary
+  user, from the source folder (see "Try it on your own PC" below). It listed the machine's
+  real USB devices (two hubs, a mouse, a camera and a wireless adapter, all protected),
+  served the console, streamed events, verified its audit chain, and stopped on a console
+  break (what Ctrl+C sends) with exit code 0. Each run was made under a flight recorder
+  (`tests/hardware/flight_recorder.py`) that refuses and records every attempt to start a
+  program, write the registry or call a mutating operating-system seam, and records every
+  file written and socket opened. With enforce mode, a lockdown and default-deny all
+  requested through the API, nothing was attempted, the three requests were refused with
+  `watch_only`, nothing was written outside the home directory and only `127.0.0.1` was
+  bound. The same run is now a test, `tests/hardware/test_watch_only_live.py` (opt-in:
+  `python -m pytest --run-hardware tests/hardware`); it passes on Windows and, with no USB
+  bus, under WSL.
+- The console was opened in a browser against that real watch-only service: the
+  watch-only bar, "Watch-only: nothing is being blocked", and the enforce, default-deny
+  and lockdown controls disabled with the reason beside each.
 
 Not demonstrated:
 
@@ -73,9 +89,14 @@ Not demonstrated:
   UNVERIFIED**, and the Linux ones that `docs/enforcement/linux.md` marks the same way.
 - **The generated service definitions.** The systemd unit and the Task Scheduler XML are
   produced and parse, but systemd and Task Scheduler have never loaded them.
-- **`portlock doctor` against a real Windows machine.** It queries access lists with
-  `icacls`, so it was not run on the development machine. Under WSL it ran and said what it
-  should: no USB bus, not root.
+- **`portlock doctor`, `run` or `status` as administrator on a real Windows machine.** In
+  an administrator window with the system-wide directories, `doctor` queries access lists
+  with `icacls` and probes the enforcement mechanisms, and `run` makes the directories
+  private with `icacls` at every start; none of that was done. As an ordinary user it runs
+  watch-only, probes nothing and runs no command; that was run on one Windows machine.
+  Under WSL it ran and said what it should: no USB bus, not root.
+- **A device plugged in or removed while the real service runs.** The live tests list the
+  devices that are present and never see one arrive.
 - **A Windows with a display language other than English.** The directory-privacy check
   reads the names `icacls` prints; on another language it reports the directory as not
   private and refuses enforce mode (it fails closed), but this was not tried.
@@ -85,18 +106,97 @@ Not demonstrated:
 ## Requirements
 
 - Python 3.11 or later. The runtime uses the standard library only.
-- To enforce anything: Administrator on Windows, root on Linux. Without that, PortLock runs
-  in monitor mode and `doctor` says what is missing.
+- To enforce anything: Administrator on Windows, root on Linux, **and** the system-wide
+  directories. Without both, PortLock runs watch-only (see below) and `doctor` says so.
 - Linux: a kernel with the USB `authorized` attributes; `authorized_default` value `2`
   needs kernel 5.1 or later. Details are in `docs/enforcement/linux.md`.
 - Optional: `pip install "portlock[signing]"` adds `cryptography` for Ed25519 signatures
   on exported audit checkpoints. ClamAV or Microsoft Defender, if present, are used by the
   scanner.
 
+## Try it on your own PC (watch-only)
+
+Watch-only means PortLock looks at your real USB devices, decides what it would do with
+each one, records that, and shows it in the web console, **and changes nothing on your
+computer outside its own folder**: it blocks nothing, ejects nothing, writes no setting or
+registry value and changes no permission outside its own folder.
+
+**Who is watch-only, and why.** Whether a PortLock process is watch-only is decided once,
+when it starts, and never changes while it runs. It is watch-only when it is **not**
+running as administrator (root on Linux), **or** when its files are in your own user
+folders. Every program you run can change files in your own folders, so nothing PortLock
+keeps there (its policy, its record of what it changed) could be trusted to control the
+computer. Such a process never even builds the parts that could change the computer, and
+there is no button, command or setting that turns them on while it runs.
+
+A watch-only PortLock **refuses**, with that reason, three things: switching to enforce
+mode, engaging an emergency lockdown and turning on default-deny. Turning default-deny
+off stays allowed. Everything else works: you can approve or deny devices and the decision
+is recorded, but nothing is blocked or ejected. When you approve a drive, or ask for a
+scan, it **reads the files on that drive** to look for suspicious ones; it does not start
+any antivirus program (Microsoft Defender or ClamAV) in watch-only.
+
+> **Use an ordinary window, not an administrator one.** Open PowerShell normally (not "Run
+> as administrator", not "Terminal (Admin)"). In an administrator window PortLock uses
+> the system-wide folders (`%ProgramData%\PortLock`) and is a **different installation,
+> one that can block devices**: it is not watch-only, `init` and `run` say so when they
+> start, and it has its own accounts and settings.
+
+You need Python 3.11 or later. Nothing has to be installed. In an ordinary PowerShell
+window, from the `PortLock` folder:
+
+```
+cd src
+python -m portlock init
+python -m portlock run
+```
+
+`init` asks for an administrator name (press Enter for `admin`) and a password, twice. It
+then prints an audit verification key and eight recovery codes, once: write them down and
+keep them somewhere safe. `run` prints the console address, for example:
+
+```
+PortLock is running in WATCH-ONLY mode: it shows and records your USB devices and changes nothing on this computer outside its own folder.
+
+  Open the console in your web browser:  http://127.0.0.1:47600/
+
+  Sign in with the administrator name and password you chose at init.
+  To stop it: press Ctrl+C here, or run 'python -m portlock stop' in another window.
+```
+
+Open that address and sign in with the name and password from `init`. Once you are
+signed in, every page of the console starts with a "Watch-only" bar saying the same thing
+and why.
+
+**To stop PortLock**, press Ctrl+C in that window, or run `python -m portlock stop` in
+another ordinary PowerShell window opened in the same `src` folder. Closing the window is
+also safe: nothing on the computer was changed, and the next `run` cleans up what the
+closed one left behind; `stop` then says at once that PortLock is not running.
+`python -m portlock doctor --offline` says in plain words that it is running per-user and
+watch-only.
+
+Its files go to `%LOCALAPPDATA%\PortLock` (on Linux, `~/.local/state/portlock` and
+`~/.config/portlock`); that folder is the only thing it changes, and deleting it removes
+every trace. (On Linux it creates that folder readable by you only.) Running from the
+source folder also lets Python write `__pycache__` folders inside `src`.
+
+These commands were run on one Windows 11 machine, as an ordinary user, with
+`PORTLOCK_HOME` pointing at a throwaway folder, a different port set in that folder's
+`portlock.toml`, and the password given on standard input (`init --password-stdin`)
+instead of typed; the typed prompt is covered only by unit tests with an injected prompt.
+Enforce mode has never been tried on real hardware.
+
 ## Quick start
 
 These commands were run on Windows (installed into a fresh virtual environment) and, where
-marked, under WSL. None needs administrator rights, and none changes the machine.
+marked, under WSL. None needs administrator rights, and run as an ordinary user none
+changes the machine.
+
+> **Use an ordinary terminal, not an administrator one (not `sudo`).** As administrator or
+> root, with directories outside your own user folders (the system-wide default, or a
+> `PORTLOCK_HOME` such as `/tmp/portlock-try`), PortLock is a system-wide installation that
+> can block devices, also in monitor mode (a lockdown blocks for real), and it sets the
+> permissions of its directories at every start.
 
 Install:
 
@@ -140,8 +240,10 @@ portlock stop
 ```
 
 `init` shows the audit verification key and the recovery codes once. Keep them offline (see
-`docs/OPERATIONS.md`). On Windows, `portlock doctor` and `portlock run` use `icacls` to make
-the state directories private, so they were not run on the development machine.
+`docs/OPERATIONS.md`). Run as an ordinary user, `doctor` and `run` are watch-only and run no
+command. Run as administrator on Windows with the system-wide directories, `doctor` reads
+the directories' access lists with `icacls`, and `run` sets them with `icacls` at every
+start, in monitor mode too; that was never run on the development machine.
 
 Run the tests (the suite creates many accounts with a deliberately slow password hash, so
 expect several minutes):
@@ -157,7 +259,20 @@ A fresh install runs in `monitor` mode. It decides, records "would block" or "wo
 read-only" in the audit log, and changes nothing. Look at `portlock devices` and
 `portlock audit tail` for a while before enforcing anything.
 
-Enforce mode is an explicit choice (`portlock mode enforce`). Before you make it:
+Monitor mode and watch-only are not the same thing:
+
+- **A watch-only process** (not administrator, or its files in a user's own folders) never
+  builds the enforcer, the dead-man timer or the directory-permission tool, so it cannot
+  change the machine by mistake. It refuses enforce mode, a lockdown and turning on
+  default-deny, says why, and stays watch-only until it stops.
+- **An administrator's system-wide service** (administrator or root, and the system-wide
+  directories) builds them at start, **in monitor mode too**: it makes its directories
+  private at every start, honours the kill switch, puts back what an earlier run changed,
+  and a lockdown engaged in monitor mode blocks for real, with its dead-man timer. In
+  monitor mode it only records what policy would block; it is never called watch-only.
+
+Enforce mode is an explicit choice (`portlock mode enforce`), and only the system-wide
+service can make it. Before you make it:
 
 1. Run `portlock doctor` as the account the service runs as, and read every `warn` and
    `fail`. A mechanism reported unavailable is reported as *not enforced*, not as blocked.
@@ -188,7 +303,8 @@ Enforce mode is an explicit choice (`portlock mode enforce`). Before you make it
   different files later.
 - **The audit log is tamper-evident, not tamper-proof.** Someone who controls the machine
   and the key can rewrite it; see `docs/THREAT_MODEL.md`.
-- Lockdown is in force only while the service runs.
+- Lockdown is in force only while the service runs, and never in a watch-only process,
+  which refuses to engage one.
 - The ClawNet audit sink exists in the code but is not wired into the service.
 - The service-install steps are manual: PortLock generates a systemd unit or a Task
   Scheduler definition for you to review and install; it installs nothing itself.

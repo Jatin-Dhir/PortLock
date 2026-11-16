@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { h, replace } from "../dom.js";
 import { plural, shortFp, timeEl, vidPid } from "../fmt.js";
 import { can, scope, state } from "../store.js";
-import { SOURCE_TEXT, posture } from "../truth.js";
+import { SOURCE_TEXT, blocksForReal, isWatchOnly } from "../truth.js";
 import {
   accessChip,
   button,
@@ -153,12 +153,14 @@ export function mount(root) {
         replace(editResult, errorBox(parsed.error));
         return;
       }
-      const enforcing = posture(state.status) !== "monitor";
+      const enforcing = blocksForReal(state.status);
       const ok = await confirmDialog({
         title: "Apply this policy?",
         message: enforcing
           ? "It takes effect at once and every connected device is re-evaluated. Devices the new policy denies are blocked now."
-          : "It takes effect at once and every connected device is re-evaluated. PortLock is in monitor mode, so nothing is blocked; the decisions change.",
+          : isWatchOnly(state.status)
+            ? "It takes effect at once and every connected device is re-evaluated. PortLock is watch-only on this computer, so nothing is blocked; the decisions change."
+            : "It takes effect at once and every connected device is re-evaluated. PortLock is in monitor mode, so nothing is blocked; the decisions change.",
         confirmLabel: "Apply policy",
       });
       if (!ok) return;

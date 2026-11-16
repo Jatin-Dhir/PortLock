@@ -48,7 +48,13 @@ from portlock.guard.fake import FakeBackend, FakeEnforcer
 from portlock.guard.seams import FakeDirPrivacy, FakeExternalTimer
 from portlock.lockdown.manager import Credential
 from portlock.scan.report import Finding, FindingSeverity, ScanReport
-from portlock.service.daemon import RUNTIME_FILE_NAME, Runtime, build_runtime
+from portlock.service.daemon import (
+    LOCK_FILE_NAME,
+    RUNTIME_FILE_NAME,
+    InstanceLock,
+    Runtime,
+    build_runtime,
+)
 
 __all__ = [
     "BANNER",
@@ -292,6 +298,7 @@ class Simulation:
         self._out: list[str] = []
         self._last_seq = 0
         self._api: ApiServer | None = None
+        self._lock: InstanceLock | None = None
         self._password: str | None = None
         self._started = False
         self._closed = False
@@ -341,14 +348,22 @@ class Simulation:
     def serve(self) -> ApiServer:
         """Start the real API (and the console, if installed) on a loopback port.
 
-        Also writes ``runtime.json`` into the simulation's state directory, so that
-        ``portlock`` pointed at it with ``PORTLOCK_HOME`` finds and authenticates the
-        service exactly as it would a real one, and starts the pump thread.
+        Also takes the state directory's instance lock and writes ``runtime.json`` into
+        it, so that ``portlock`` pointed at it with ``PORTLOCK_HOME`` finds and
+        authenticates the service exactly as it would a real one (``status`` and ``stop``
+        trust a runtime file only while its instance lock is held), and starts the pump
+        thread.
 
         Raises:
             OSError: if the port cannot be bound.
+            SimulationError: if another PortLock already runs in this home.
         """
         self.start()
+        if self._lock is None:
+            lock = InstanceLock(Path(self.config.paths.state_dir) / LOCK_FILE_NAME)
+            if not lock.acquire():
+                raise SimulationError("another PortLock is already running in this home")
+            self._lock = lock
         api = ApiServer(self.runtime)
         api.start()
         self._api = api
@@ -402,6 +417,9 @@ class Simulation:
                 self.service.stop()
         self.runtime.close()
         self.backend.stop()
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
         if self._own_home:
             shutil.rmtree(self.home, ignore_errors=True)
 

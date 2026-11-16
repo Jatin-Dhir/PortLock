@@ -9,37 +9,30 @@ import { api } from "./api.js";
 import { h, replace } from "./dom.js";
 import { countdown } from "./fmt.js";
 import { can, refreshChanges, scope, state } from "./store.js";
-import { KIND_TEXT } from "./truth.js";
+import { KIND_TEXT, changeCopy } from "./truth.js";
 import { button, chip, toast } from "./ui.js";
-
-const EXPLAIN = {
-  lockdown: "Removable storage is blocked and new devices are denied now.",
-  enforce_mode: "PortLock is now blocking, not just watching.",
-  widen_scope: "More kinds of device are now enforced against.",
-  default_deny: "The operating system now refuses unknown new devices by default.",
-};
 
 function needed(change) {
   return change.kind === "lockdown" ? "engage_lockdown" : "change_mode";
 }
 
-function previewList(change) {
+// The words, "Blocked" or "Would be blocked", come from truth.js: only a change that really
+// blocks may say a device is blocked.
+function previewList(change, copy) {
   const items = change.preview || [];
   if (items.length === 0) return h("p", { class: "hint" }, "No connected device is affected.");
-  const blocked = items.filter((item) => item.outcome === "block").length;
   return h(
     "details",
     {},
-    h("summary", {}, `${blocked} of ${items.length} connected device${items.length === 1 ? "" : "s"} blocked by this change`),
+    h("summary", {}, copy.summary),
     h(
       "ul",
       { class: "preview" },
-      items.map((item) =>
+      items.map((item, index) =>
         h(
           "li",
           {},
-          chip(item.outcome === "block" ? "Blocked" : item.outcome === "protected" ? "Protected" : item.outcome === "exempt" ? "Exempt" : "Not enforced",
-            item.outcome === "block" ? "c-deny" : item.outcome === "not_enforced" ? "c-pending" : "c-watch"),
+          chip(copy.items[index].label, copy.items[index].tone, { dashed: copy.items[index].dashed }),
           h("span", {}, `${item.name} (${item.vid_pid})`),
           h("span", { class: "muted" }, item.reason),
         ),
@@ -60,8 +53,9 @@ export function mountChangeBar(container) {
     container.className = "changebar";
     replace(
       container,
-      state.changes.map((change) =>
-        h(
+      state.changes.map((change) => {
+        const copy = changeCopy(change, state.status);
+        return h(
           "section",
           { "aria-label": `${KIND_TEXT[change.kind] || change.kind} waiting for confirmation`, role: "alert" },
           h(
@@ -89,13 +83,15 @@ export function mountChangeBar(container) {
               },
             }),
           ),
-          h("p", { class: "hint" }, `${EXPLAIN[change.kind] || ""} Made by ${change.actor}. If you cannot reach this page any more, it undoes itself.`),
-          previewList(change),
-        ),
-      ),
+          h("p", { class: "hint" }, `${copy.explain} Made by ${change.actor}. If you cannot reach this page any more, it undoes itself.`.trim()),
+          previewList(change, copy),
+        );
+      }),
     );
   }
 
+  // Not on "status": re-drawing would take focus off the Confirm button. A mode or lockdown
+  // change is followed by a fresh list of changes (store.refreshChanges), which re-draws this.
   s.on("changes", render);
   render();
   return () => s.dispose();

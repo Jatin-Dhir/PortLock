@@ -7,7 +7,7 @@ import { deviceIdentity, confidenceChip, openDeviceDetail } from "./devicetable.
 import { h, replace, uid } from "./dom.js";
 import { bytes, liveAgo } from "./fmt.js";
 import { applyEvent, can, scope, state } from "./store.js";
-import { decisionLine, enforcementTruth } from "./truth.js";
+import { approvalMessage, decisionLine, denialMessage, enforcementTruth, isWatchOnly, pendingWaitNote } from "./truth.js";
 import { button, checkbox, chip, empty, enforcementCell, field, select, tags, textInput, toast } from "./ui.js";
 
 const DURATIONS = [
@@ -30,6 +30,7 @@ function buildForms(conn) {
   const id = conn.connection_id;
   const group = uid("kind");
   const low = conn.confidence === "low";
+  const watchOnly = isWatchOnly(state.status);
 
   if (!can("approve_device")) {
     return h("p", { class: "note" }, "Your role can view this device but not decide on it.");
@@ -49,7 +50,9 @@ function buildForms(conn) {
   const duration = select(DURATIONS.concat(can("manage_users") ? [["7d", "7 days"]] : []), "2h");
   const durationField = field("For how long", duration);
   durationField.hidden = true;
-  const readOnly = checkbox("Read-only", { hint: "It can be read from but not written to" });
+  const readOnly = checkbox("Read-only", {
+    hint: watchOnly ? "Recorded in the grant. Watch-only makes nothing read-only on this computer." : "It can be read from but not written to",
+  });
   const note = textInput({ maxlength: "512", placeholder: "Optional: why" });
   const radios = h(
     "div",
@@ -78,28 +81,27 @@ function buildForms(conn) {
       if (note.value.trim()) body.note = note.value.trim();
       const reply = await api.post(`/connections/${id}/approve`, body);
       applyEvent("decision.made", { connection: reply.connection });
-      const outcome = reply.connection.decision;
-      const stillBlocked = reply.connection.state === "denied" || reply.connection.state === "pending";
-      toast(
-        stillBlocked
-          ? `Grant recorded, but the device is still ${reply.connection.state}: ${outcome.reasons[0] || "a policy rule applies"}`
-          : `Approved: now ${reply.connection.state.replace("_", "-")}.`,
-        stillBlocked ? "bad" : "good",
-      );
+      // "now read-only" may be said only when the operating system was made to do it.
+      const message = approvalMessage(reply.connection, state.status);
+      toast(message.text, message.tone);
     },
   });
 
-  const eject = checkbox("Also ask the system to eject it", { hint: "Does not delete or change anything on the device" });
+  // A watch-only process can eject nothing, so it does not offer to.
+  const eject = checkbox("Also ask the system to eject it", {
+    hint: watchOnly ? "Not available: PortLock is watch-only on this computer and ejects nothing." : "Does not delete or change anything on the device",
+  });
+  eject.input.disabled = watchOnly;
   const denyNote = textInput({ maxlength: "512", placeholder: "Optional: why" });
   const deny = button("Deny", {
     tone: "danger",
     onClick: async () => {
-      const body = { eject: eject.input.checked };
+      const body = { eject: !watchOnly && eject.input.checked };
       if (denyNote.value.trim()) body.note = denyNote.value.trim();
       const reply = await api.post(`/connections/${id}/deny`, body);
       applyEvent("decision.made", { connection: reply.connection });
-      if (reply.eject && !reply.eject.ok) toast(`Denied, but the eject failed: ${reply.eject.error}`, "bad");
-      else toast("Denied for this connection. It will be pending again if it is plugged in again.", "good");
+      const message = denialMessage(reply, state.status);
+      toast(message.text, message.tone);
     },
   });
 
@@ -113,7 +115,7 @@ function buildForms(conn) {
 
 function describe(conn) {
   const device = conn.device;
-  const truth = enforcementTruth(conn);
+  const truth = enforcementTruth(conn, { watchOnly: isWatchOnly(state.status) });
   const volumes = volumeSummary(device);
   return h(
     "div",
@@ -126,9 +128,7 @@ function describe(conn) {
     h("div", { class: "cell-sub" }, "Plugged in ", liveAgo(conn.connected_at)),
     conn.decision ? h("div", { class: "cell-sub" }, `Why pending: ${conn.decision.reasons[0] || decisionLine(conn.decision)}`) : null,
     enforcementCell(conn),
-    truth.kind === "intended"
-      ? h("p", { class: "note warn" }, "Monitor mode: this device is NOT blocked while it waits. Approving it changes nothing yet.")
-      : null,
+    truth.kind === "intended" ? h("p", { class: "note warn" }, pendingWaitNote(state.status)) : null,
     truth.kind === "none"
       ? h("p", { class: "note bad" }, "This device is waiting, but PortLock did not block it. See the enforcement note above.")
       : null,

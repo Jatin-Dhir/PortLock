@@ -5,7 +5,7 @@ import { api, seg } from "./api.js";
 import { frag, h } from "./dom.js";
 import { bytes, hex, liveAgo, timeEl, vidPid } from "./fmt.js";
 import { state, can } from "./store.js";
-import { decisionLine, enforcementTruth, SOURCE_TEXT } from "./truth.js";
+import { decisionLine, enforcementTruth, intendedNote, isWatchOnly, provisionalNote, SOURCE_TEXT } from "./truth.js";
 import {
   accessChip,
   button,
@@ -58,7 +58,7 @@ export function deviceTable(conns, { onOpen, caption = "Connected devices" }) {
         cell: (conn) =>
           frag(
             stateChip(conn.state),
-            conn.provisional ? h("div", { class: "cell-sub" }, "Held read-only until its scan is clean") : null,
+            conn.provisional ? h("div", { class: "cell-sub" }, provisionalNote(conn, state.status)) : null,
           ),
       },
       {
@@ -101,7 +101,7 @@ export async function openDeviceDetail(conn) {
     ]);
     const live = detail.connection;
     const device = live.device;
-    const truth = enforcementTruth(live);
+    const truth = enforcementTruth(live, { watchOnly: isWatchOnly(state.status) });
     const decision = live.decision;
     content.replaceChildren(
       h(
@@ -146,9 +146,7 @@ export async function openDeviceDetail(conn) {
         : h("p", { class: "muted" }, "No decision yet."),
       h("div", {}, enforcementCell(live)),
       live.enforcement && live.enforcement.error ? h("p", { class: "note bad" }, live.enforcement.error) : null,
-      truth.kind === "intended"
-        ? h("p", { class: "note" }, "PortLock is in monitor mode. Nothing was blocked, ejected or changed for this device.")
-        : null,
+      truth.kind === "intended" ? h("p", { class: "note" }, intendedNote(state.status)) : null,
       h("h3", {}, "Decision history for this connection"),
       detail.decisions.length === 0
         ? empty("No decisions recorded")

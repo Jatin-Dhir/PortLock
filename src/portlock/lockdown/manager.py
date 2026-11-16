@@ -891,7 +891,11 @@ class LockdownManager:
             confirm_remaining_seconds=(
                 None if change_id is None else self._confirmations.remaining_seconds(change_id)
             ),
-            external_timer_armed=record.timer_armed and self._timer_ok,
+            # A watch-only stand-in (``inert``) accepts the call but arms nothing, so it is
+            # not reported as an operating-system timer.
+            external_timer_armed=(
+                record.timer_armed and self._timer_ok and not getattr(self._timer, "inert", False)
+            ),
         )
 
     def plan(self, devices: Sequence[Connected] | None = None) -> list[PlanItem]:
@@ -1540,10 +1544,12 @@ def rollback(
 ) -> RollbackReport:
     """Put every journaled setting back, newest first. Never raises.
 
-    1. Every open record that is not a hold is restored, one entry per call; on success
-       it is closed, otherwise it stays open and is reported.
+    1. Every open record that is not a hold is restored, one entry per call; when the
+       restore was performed it is closed, otherwise it stays open and is reported.
     2. Every hold is released by unblocking its device if present, and closed (an
-       absent device's hold went with it).
+       absent device's hold went with it). A record is closed only on a result that was
+       really performed (``EnforcementResult.performed``): a dry-run or watch-only
+       stand-in changes nothing, so its "ok" never closes a record.
     3. If default-deny was journaled, the present devices are unblocked, hubs first
        (nothing behind an unauthorized hub can enumerate, so a dock is admitted before
        the keyboard plugged into it): a device that arrived under default-deny while
@@ -1584,7 +1590,7 @@ def rollback(
             result = releasing(
                 record.scope, Action.RESTORE, functools.partial(enforcer.restore, [record.entry])
             )
-            if result.ok:
+            if result.performed:
                 journal.close([record.id], reason=reason)
                 restored += 1
             else:
@@ -1603,11 +1609,13 @@ def rollback(
             result = releasing(
                 device.instance_id, Action.UNBLOCK, functools.partial(enforcer.unblock, device)
             )
-            if result.ok:
+            if result.performed:
                 journal.close([record.id], reason=reason)
                 released += 1
             else:
-                failed.append((record.id, result.error or "unblock failed"))
+                # A stand-in (dry-run, watch-only) "succeeds" without unblocking anything:
+                # the device is still held, so the hold stays open.
+                failed.append((record.id, result.error or f"not unblocked ({result.mechanism})"))
         except Exception as exc:
             failed.append((record.id, f"{type(exc).__name__}: {exc}"))
     if default_deny:

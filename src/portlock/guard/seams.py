@@ -63,6 +63,7 @@ from xml.sax.saxutils import escape as xml_escape
 from portlock.core.errors import EnforcementError
 from portlock.core.fsutil import atomic_write_bytes, atomic_write_text
 from portlock.core.models import sanitize_device_text
+from portlock.core.privilege import process_elevated
 from portlock.guard.base import JournalEntry
 
 __all__ = [
@@ -554,17 +555,7 @@ class DirPrivacy(Protocol):
 
 def current_process_privileged() -> bool:
     """True if this process runs as root (POSIX) or as an administrator (Windows)."""
-    if sys.platform == "win32":
-        loader = getattr(ctypes, "WinDLL", None)
-        if loader is None:
-            return False
-        try:
-            shell32 = loader("shell32.dll", use_last_error=True, winmode=_SEARCH_SYSTEM32)
-            return bool(shell32.IsUserAnAdmin())
-        except (OSError, AttributeError):
-            return False
-    geteuid = getattr(os, "geteuid", None)
-    return geteuid is not None and geteuid() == 0
+    return process_elevated()
 
 
 # --------------------------------------------------------------------------------------

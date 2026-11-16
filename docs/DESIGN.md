@@ -372,3 +372,44 @@ these conflict with anything above, these win.
     grant (14.12). A connection that survives a restart keeps the time it really arrived,
     when the backend's connection token proves it is the same connection, so a lockdown's
     exemption for devices connected before it began survives a restart.
+
+### Watch-only (16 November 2026)
+
+28. **A process that could never be trusted to enforce is watch-only, for its whole
+    life.** A process is watch-only exactly when it is not elevated (administrator, root)
+    or its state or configuration directory is not a system-wide location. Nothing else
+    decides it, the mode included, and it is decided once, at start
+    (`guard/watchonly.py`); there is no way out of it inside the process.
+
+    - *Where.* An ordinary user's PortLock keeps its state per-user
+      (`%LOCALAPPDATA%\PortLock`, the XDG directories); an elevated one uses
+      `%ProgramData%\PortLock` or `/var/lib/portlock` and `/etc/portlock`. A directory
+      counts as system-wide only if it is provably outside the user's profile: on the
+      running system both sides are resolved (8.3 names, `..`, junctions, symbolic links,
+      `subst` drives), and a UNC or device-namespace path, or a profile variable that is
+      set but empty, relative or unresolvable, counts as not system-wide.
+    - *What it gets.* The composition root gives a watch-only service inert stand-ins for
+      the enforcer, the dead-man timer and the directory-privacy seam; the real objects
+      are never built, so no command (`icacls`, `schtasks`, `systemd-run`), registry
+      write, device call or permission change can happen. Its scanner has no antivirus
+      engine, because ClamAV and Defender would start programs; heuristics and hash lists
+      run in-process and only read. It changes nothing on the computer outside its own
+      folder (on Linux that folder is still created with mode 0700).
+    - *What it refuses.* Enforce mode, a lockdown and turning default-deny on are refused
+      with the reason (`watch_only`, HTTP 409) and leave no pending change, lockdown
+      record or setting behind. A lockdown is therefore never reported active unless it
+      blocks. Decisions are audited as "would apply"; `ModeInfo` carries `watch_only` and
+      `watch_only_reason`, and `can_enforce` is false.
+    - *What it never does.* A stand-in's result is never *performed*
+      (`EnforcementResult.performed`): no journal record is closed, and PortLock never
+      forgets that it holds a device back, on a dry-run or watch-only result, in the
+      service or in `rollback`. A watch-only process restores nothing before the database
+      (it changed nothing), and refuses to start, writing nothing to the journal, when it
+      finds open journal records or a lockdown that is not idle: an enforcing PortLock
+      left them, and it can neither enforce nor undo them. `portlock recover` refuses a
+      per-user home, whose journal any program the user runs could have forged.
+    - *Every other process* (elevated, system-wide directories) is never called
+      watch-only and behaves as before this item: the real objects are built at start,
+      the directories are made private at every start (14.18), the kill switch is
+      honoured, journaled changes are restored, and an engaged lockdown blocks for real
+      with its dead-man timer, in monitor mode too (section 11).

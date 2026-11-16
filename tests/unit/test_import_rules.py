@@ -167,13 +167,16 @@ GUARD_USERS: dict[str, set[str]] = {
         f"{ROOT}.guard.fake",
         f"{ROOT}.guard.safety",
         f"{ROOT}.guard.seams",
+        f"{ROOT}.guard.watchonly",
     },
-    # ``portlock recover`` builds the platform enforcer behind the safety layer.
+    # ``portlock recover`` builds the platform enforcer behind the safety layer; the
+    # offline ``doctor`` asks the watch-only posture whether to probe at all.
     f"{ROOT}.console.cli": {
         f"{ROOT}.guard",
         f"{ROOT}.guard.base",
         f"{ROOT}.guard.factory",
         f"{ROOT}.guard.safety",
+        f"{ROOT}.guard.watchonly",
     },
     # The simulator takes the fakes directly and never the factory: it cannot pick a real one.
     f"{ROOT}.console.simulate": {f"{ROOT}.guard.base", f"{ROOT}.guard.fake", f"{ROOT}.guard.seams"},

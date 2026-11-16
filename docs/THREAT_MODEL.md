@@ -30,7 +30,8 @@ PortLock concerns USB devices on one machine. It does not defend against:
   it, so a driver or descriptor-parsing flaw is reachable before any block (the reactive
   window, section 4.3);
 - an adversary who already runs as root or SYSTEM (section 3.4);
-- anything that happens on a machine where the service is not running.
+- anything that happens on a machine where the service is not running, or where only a
+  watch-only PortLock runs (section 3.5): that one watches and records, and blocks nothing.
 
 ## 3. Adversaries
 
@@ -54,10 +55,11 @@ second after arrival (4.3), or tell a hostile device from the honest one it imit
 
 ### 3.2 A standard local user
 
-A standard user on the machine cannot change PortLock's state: the state and configuration
-directories are made private to the service's account (Administrators and SYSTEM on
-Windows, root on Linux), checked at every start, and enforce mode is refused if they are
-not. They cannot read `runtime.json`, so they cannot use the local login channel.
+A standard user on the machine cannot change the state of a system-wide PortLock: its
+state and configuration directories are made private to the service's account
+(Administrators and SYSTEM on Windows, root on Linux) at every start, in monitor mode as
+well as enforce mode, and enforce mode is refused if they cannot be. (A standard user's own
+PortLock is a different thing: section 3.5.) They cannot read `runtime.json`, so they cannot use the local login channel.
 
 What they can do:
 
@@ -121,7 +123,50 @@ rights: `portlock recover`, the kill switch and the dead-man timer all end a loc
 without a PortLock credential, by design, so that PortLock itself can never be the thing
 that cannot be undone.
 
-### 3.5 Someone who can restart the machine
+### 3.5 A watch-only PortLock (a user's own, or any process that is not trusted to enforce)
+
+A PortLock process is **watch-only** when it is not elevated (administrator, root), or when
+its state or configuration directory is inside a user's own profile. It is decided once, at
+start; the mode does not decide it, and nothing inside the process can change it. The
+reason is the adversary of 3.3: every program a user runs can write that user's own
+folders, so a policy, a configuration or an enforcement journal kept there could be written
+by malware, and must never drive the real enforcer, not even from an elevated process.
+Another spelling of the profile (a short name, a `\\?\` or UNC path, `..`, a junction, a
+symbolic link, a `subst` drive) is resolved before the comparison, and anything that cannot
+be resolved counts as per-user (fail closed).
+
+What a watch-only process can do to the machine: nothing outside its own folder. It never
+builds the enforcer, the dead-man timer or the directory-permission tool; inert stand-ins
+take their place. It runs no program (no `icacls`, no `schtasks`, no antivirus scanner),
+writes no registry value, creates no timer or task, changes no permission and calls no
+device disable, enable or eject function. Its scans read the files of a drive someone
+approved or asked to scan, with PortLock's own heuristics and hash lists only. It refuses
+enforce mode, a lockdown and turning default-deny on, so a lockdown can never be reported
+as active while nothing is blocked.
+
+What it means for the adversaries above:
+
+- **It protects nothing.** A hostile device plugged in while only a watch-only PortLock
+  runs is recorded, alerted on and shown in the console, and is fully usable. The console
+  and the command line say "watch-only" for exactly this reason.
+- **Its records are only as safe as the user's own folders.** Malware running as that user
+  (3.3) can rewrite its database, its audit head file and its audit key store together, so
+  its audit log shows nothing reliable against that malware. An external copy (a syslog
+  sink) still helps.
+- **It cannot be used to change the machine.** A forged policy or journal in a per-user
+  folder reaches only inert stand-ins. `portlock recover` refuses a per-user home before it
+  writes anything, so an elevated `recover` cannot be tricked into applying a forged
+  journal with the real enforcer.
+- **It cannot hide or undo an enforcing PortLock's changes.** If it finds open journal
+  records or a lockdown that is not idle in the directories it would use, it refuses to
+  start and says to start PortLock, or run `portlock recover`, as administrator. It never
+  closes a journal record on a result that changed nothing.
+
+An administrator's system-wide PortLock is never watch-only. In monitor mode it builds the
+real mechanisms at start, makes its directories private, honours the kill switch, restores
+what an earlier run left, and a lockdown it engages blocks.
+
+### 3.6 Someone who can restart the machine
 
 Restarting (power, a crash, a forced reboot) is within reach of anyone with physical access
 and of some local users. What it does:
