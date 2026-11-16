@@ -49,7 +49,7 @@ portlock = ["py.typed", "console/static/*", "console/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 addopts = "-ra --strict-markers --strict-config"
 markers = [
   "hardware: reads real device information from this machine without changing anything; skipped unless --run-hardware is given",
