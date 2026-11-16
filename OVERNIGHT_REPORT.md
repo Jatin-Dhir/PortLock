@@ -80,6 +80,10 @@ change the operating system has only ever run against fakes.
 - Found during the build: `portlock recover` wrote the kill-switch file before checking
   for administrator rights, so a refused attempt left enforcement switched off. Fixed, with
   a regression test.
+- Found by CI after everything passed locally: when two database handles appended at
+  the same moment, the audit head file could be left one record behind, because each
+  handle compared and wrote under its own lock. Compare-and-write now happens under a
+  lock shared through the filesystem.
 - A policy pitfall: vendor id `8087` written as a number was read as decimal and silently
   never matched vendor `0x8087`. Ids must now be hex strings.
 
@@ -99,9 +103,9 @@ Integration tests cover each area asked for: detection, authorization, trusted d
 unauthorized devices, permission enforcement, removal, reconnection, policy expiration,
 service restart, security event logging, lockdown safeguards.
 
-On GitHub Actions, the commit before the console work passed lint and tests on Linux and
-Windows across Python 3.11 to 3.14. The run for the final commit had not finished when
-this was written.
+On GitHub Actions, the last code change (`c1c3404`) passed lint and the full suite on
+Linux and Windows across Python 3.11 to 3.14: nine jobs, all green. The run before it
+had failed one test on Linux with Python 3.14; see section 5.
 
 ## 7. Build and runtime verification
 
@@ -118,8 +122,8 @@ this was written.
 
 ## 8. Git commits created
 
-17 commits, from `35777d0` (retire the prototype) to `e5ffa8e` (HTTP API, CLI, simulator),
-plus the commit that adds this report. `git log main..claude/overnight-security-framework`
+18 code commits, from `35777d0` (retire the prototype) to `c1c3404` (the audit race fix),
+plus the commits that add and correct this report. `git log main..claude/overnight-security-framework`
 lists them; each is one logical unit.
 
 ## 9. Changes pushed
