@@ -4,28 +4,39 @@ One :class:`Database` wraps one connection. The connection is shared between thr
 (the device monitor, the API server and timers all write) and guarded by a re-entrant
 lock, so callers never see ``database is locked`` from inside the process. A separate
 process, such as the CLI while the service runs, opens its own :class:`Database` on the
-same file; write-ahead logging and a busy timeout make that safe.
+same file; write-ahead logging (where the filesystem supports it) and a busy timeout make
+that safe, and :meth:`Database.migrate` re-checks what another process has applied.
 
 Each component (audit, auth, grants, ...) owns its tables and registers its own ordered
 list of migrations under its own name, so components evolve independently.
+
+No statement leaves a cursor open: :meth:`Database.execute` finishes its statement
+before returning and :meth:`Database.query_one` closes its cursor after the first row,
+because an unfinished read statement keeps a read transaction open, which blocks WAL
+checkpoints and, without WAL, every writer in every process.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from portlock.core.errors import StoreError
 
-__all__ = ["Database"]
+__all__ = ["Database", "ExecuteResult"]
 
+_LOG = logging.getLogger(__name__)
 _COMPONENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+# PRAGMA quick_check reports at most this many problems; more add nothing actionable.
+_MAX_CHECK_PROBLEMS = 100
 
 _MIGRATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -36,6 +47,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 )
 """
 
+_VERSION_QUERY = (
+    "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations WHERE component = ?"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecuteResult:
+    """What a statement run by :meth:`Database.execute` did.
+
+    Attributes:
+        rowcount: rows changed by an ``INSERT``, ``UPDATE`` or ``DELETE``; -1 otherwise.
+        lastrowid: the rowid of the last row inserted, if any.
+    """
+
+    rowcount: int
+    lastrowid: int | None
+
 
 class Database:
     """A thread-safe handle on one SQLite database.
@@ -43,6 +71,9 @@ class Database:
     Args:
         path: database file. ``None`` gives a private in-memory database (tests).
         read_only: open without the ability to write; the file must already exist.
+
+    Raises:
+        StoreError: if the database cannot be opened or initialised.
     """
 
     def __init__(
@@ -73,15 +104,37 @@ class Database:
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.execute("PRAGMA trusted_schema = OFF")
+            if read_only or self._path is None:
+                self._journal_mode = self._pragma_text("PRAGMA journal_mode")
+            else:
+                self._journal_mode = self._enable_wal()
             if not read_only:
                 # FULL: a committed audit record survives power loss.
                 self._conn.execute("PRAGMA synchronous = FULL")
-                if self._path is not None:
-                    self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute(_MIGRATIONS_TABLE)
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, StoreError) as exc:
             self._conn.close()
             raise StoreError(f"cannot initialise database {self._path}: {exc}") from exc
+
+    def _pragma_text(self, sql: str) -> str:
+        with closing(self._conn.execute(sql)) as cursor:
+            row = cursor.fetchone()
+        if row is None or not isinstance(row[0], str):
+            raise StoreError(f"{sql} returned {row[0] if row else None!r}")
+        return row[0].lower()
+
+    def _enable_wal(self) -> str:
+        mode = self._pragma_text("PRAGMA journal_mode = WAL")
+        if mode != "wal":
+            # SQLite answers with the mode it kept when WAL is unavailable (a network
+            # share, a filesystem without shared memory). Every write is still atomic
+            # and durable; readers just wait for writers. Say so rather than pretend.
+            _LOG.warning(
+                "write-ahead logging is unavailable for %s; using journal mode %r",
+                self._path,
+                mode,
+            )
+        return mode
 
     @property
     def path(self) -> Path | None:
@@ -92,11 +145,29 @@ class Database:
     def read_only(self) -> bool:
         return self._read_only
 
-    def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor:
-        """Run one statement. Outside :meth:`transaction` it commits immediately."""
+    @property
+    def journal_mode(self) -> str:
+        """The journal mode SQLite actually uses, lower-case: ``wal`` for a writable
+        file where the filesystem allows it, ``memory`` for an in-memory database,
+        otherwise what SQLite kept (typically ``delete``)."""
+        return self._journal_mode
+
+    def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> ExecuteResult:
+        """Run one statement to completion. Outside :meth:`transaction` it commits
+        immediately.
+
+        Any rows the statement produces are discarded and the cursor is closed before
+        this returns, so no read stays open; use :meth:`query` to read.
+
+        Raises:
+            StoreError: if SQLite reports an error.
+        """
         with self._lock:
             try:
-                return self._conn.execute(sql, params)
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    if cursor.description is not None:
+                        cursor.fetchall()
+                    return ExecuteResult(rowcount=cursor.rowcount, lastrowid=cursor.lastrowid)
             except sqlite3.Error as exc:
                 raise StoreError(f"database error: {exc}") from exc
 
@@ -104,17 +175,19 @@ class Database:
         """Run a query and return every row."""
         with self._lock:
             try:
-                return self._conn.execute(sql, params).fetchall()
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    return cursor.fetchall()
             except sqlite3.Error as exc:
                 raise StoreError(f"database error: {exc}") from exc
 
     def query_one(
         self, sql: str, params: Sequence[Any] | dict[str, Any] = ()
     ) -> sqlite3.Row | None:
-        """Run a query and return the first row, or ``None``."""
+        """Run a query and return the first row, or ``None``. The rest are discarded."""
         with self._lock:
             try:
-                return self._conn.execute(sql, params).fetchone()
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    return cursor.fetchone()
             except sqlite3.Error as exc:
                 raise StoreError(f"database error: {exc}") from exc
 
@@ -123,8 +196,15 @@ class Database:
         """Group statements so they all commit or all roll back.
 
         Holds the lock for the duration, so a read-then-write inside the block cannot be
-        interleaved with another thread. Nesting is allowed; an inner block that raises
-        rolls back only its own work.
+        interleaved with another thread. The outermost block takes the write lock at
+        once (``BEGIN IMMEDIATE``), so its reads see the latest committed state of every
+        process. Nesting is allowed; an inner block that raises rolls back only its own
+        work.
+
+        If the block raises, the work is rolled back and *that* exception propagates.
+        A rollback is attempted only while SQLite still has a transaction open (some
+        errors end it themselves), and a failure of the rollback itself is logged, never
+        allowed to replace the original exception.
         """
         with self._lock:
             outermost = self._depth == 0
@@ -138,20 +218,29 @@ class Database:
                 yield self
             except BaseException:
                 self._depth -= 1
-                if outermost:
-                    self._conn.execute("ROLLBACK")
-                else:
-                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                self._roll_back(outermost, savepoint)
                 raise
+            self._depth -= 1
+            try:
+                self._conn.execute("COMMIT" if outermost else f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.Error as exc:
+                if outermost:
+                    self._roll_back(outermost, savepoint)
+                raise StoreError(f"cannot commit transaction: {exc}") from exc
+
+    def _roll_back(self, outermost: bool, savepoint: str) -> None:
+        if not self._conn.in_transaction:
+            # SQLite already rolled the transaction back (for instance on a full disk or
+            # an I/O error); a ROLLBACK now would only fail.
+            return
+        try:
+            if outermost:
+                self._conn.execute("ROLLBACK")
             else:
-                self._depth -= 1
-                try:
-                    self._conn.execute("COMMIT" if outermost else f"RELEASE SAVEPOINT {savepoint}")
-                except sqlite3.Error as exc:
-                    if outermost:
-                        self._conn.execute("ROLLBACK")
-                    raise StoreError(f"cannot commit transaction: {exc}") from exc
+                self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except sqlite3.Error as exc:
+            _LOG.error("rollback failed; the original error is reported instead", exc_info=exc)
 
     def migrate(self, component: str, migrations: Sequence[str]) -> int:
         """Bring one component's tables up to date.
@@ -159,6 +248,10 @@ class Database:
         ``migrations[i]`` is the SQL (one or more statements) that takes the component
         from version ``i`` to ``i + 1``. Each migration runs in its own transaction.
         Published migrations must never be edited or reordered; append new ones.
+
+        Safe when several processes migrate the same file at once: the version is read
+        again inside each ``BEGIN IMMEDIATE`` (which takes the write lock), so a
+        migration another process has applied in the meantime is skipped, not repeated.
 
         Returns:
             The component's schema version after migrating.
@@ -168,21 +261,22 @@ class Database:
         """
         if not _COMPONENT_PATTERN.match(component):
             raise StoreError(f"invalid component name: {component!r}")
+        target = len(migrations)
         with self._lock:
-            row = self.query_one(
-                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
-                " WHERE component = ?",
-                (component,),
-            )
-            current = int(row["version"]) if row is not None else 0
-            if current > len(migrations):
-                raise StoreError(
-                    f"the {component} tables are at version {current}, but this version of "
-                    f"PortLock only knows version {len(migrations)}; upgrade PortLock"
-                )
-            for version in range(current + 1, len(migrations) + 1):
+            while True:
+                version = 0
                 try:
                     with self.transaction():
+                        current = self._version_locked(component)
+                        if current > target:
+                            raise StoreError(
+                                f"the {component} tables are at version {current}, but this "
+                                f"version of PortLock only knows version {target}; upgrade "
+                                "PortLock"
+                            )
+                        if current == target:
+                            return target
+                        version = current + 1
                         for statement in _split_statements(migrations[version - 1]):
                             self._conn.execute(statement)
                         self._conn.execute(
@@ -192,16 +286,56 @@ class Database:
                         )
                 except sqlite3.Error as exc:
                     raise StoreError(f"migration {version} of {component} failed: {exc}") from exc
-            return len(migrations)
+
+    def _version_locked(self, component: str) -> int:
+        with closing(self._conn.execute(_VERSION_QUERY, (component,))) as cursor:
+            row = cursor.fetchone()
+        return int(row["version"]) if row is not None else 0
 
     def schema_version(self, component: str) -> int:
         """The applied schema version of a component (0 if it has no tables yet)."""
-        row = self.query_one(
-            "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
-            " WHERE component = ?",
-            (component,),
-        )
+        row = self.query_one(_VERSION_QUERY, (component,))
         return int(row["version"]) if row is not None else 0
+
+    def quick_check(self) -> list[str]:
+        """Run ``PRAGMA quick_check`` and return the problems it finds.
+
+        Returns:
+            One line per problem; empty when the database is healthy. A database too
+            damaged to be checked at all yields one line saying why. Never raises for
+            a damaged database.
+        """
+        with self._lock:
+            return _quick_check(self._conn)
+
+    @staticmethod
+    def check_file(path: str | os.PathLike[str]) -> list[str]:
+        """Check a database file without opening it as a :class:`Database`.
+
+        For the start-up check (``docs/DESIGN.md`` section 14.23): the file is opened
+        read-only, nothing is created or changed, and a file too damaged for the
+        :class:`Database` constructor is still reported rather than raising.
+
+        Returns:
+            The problems ``PRAGMA quick_check`` finds; empty when the file is healthy.
+
+        Raises:
+            StoreError: if the file does not exist (a missing database is not a damaged
+                one: there is nothing to rename aside).
+        """
+        target = Path(path)
+        if not target.is_file():
+            raise StoreError(f"database file not found: {target}")
+        try:
+            conn = sqlite3.connect(
+                f"{target.resolve().as_uri()}?mode=ro", uri=True, isolation_level=None
+            )
+        except sqlite3.Error as exc:
+            return [f"cannot open {target.name}: {exc}"]
+        try:
+            return _quick_check(conn)
+        finally:
+            conn.close()
 
     def close(self) -> None:
         """Close the connection. Safe to call more than once."""
@@ -213,6 +347,17 @@ class Database:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+def _quick_check(conn: sqlite3.Connection) -> list[str]:
+    try:
+        with closing(conn.execute(f"PRAGMA quick_check({_MAX_CHECK_PROBLEMS})")) as cursor:
+            lines = [str(row[0]) for row in cursor.fetchall()]
+    except sqlite3.Error as exc:
+        # "file is not a database", "database disk image is malformed", ...: the check
+        # could not even run, which is itself the finding.
+        return [f"the database cannot be checked: {exc}"]
+    return [] if lines == ["ok"] else lines
 
 
 def _split_statements(script: str) -> list[str]:

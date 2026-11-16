@@ -23,10 +23,13 @@ from portlock.core.models import (
     Decision,
     DecisionSource,
     DeviceCategory,
+    DeviceEvent,
+    DeviceEventType,
     ScanRequirement,
     Severity,
     UsbDevice,
     UsbInterface,
+    Volume,
 )
 from portlock.guard.base import Action, EnforcementResult, JournalEntry, Tier
 
@@ -165,7 +168,7 @@ def test_severity_is_ordered() -> None:
 
 
 def test_journal_entry_and_result_serialize() -> None:
-    entry = JournalEntry("sysfs", "/sys/bus/usb/devices/1-1/authorized", "1", "0")
+    entry = JournalEntry("sysfs_authorized", "/sys/bus/usb/devices/1-1/authorized", "1", "0")
     assert JournalEntry.from_dict(entry.to_dict()) == entry
     result = EnforcementResult(
         Action.BLOCK, True, "sysfs:authorized", Tier.REACTIVE, changed=True, undo=(entry,)
@@ -173,3 +176,78 @@ def test_journal_entry_and_result_serialize() -> None:
     data = result.to_dict()
     assert data["action"] == "block" and data["tier"] == "reactive"
     assert data["undo"] == [entry.to_dict()]
+
+
+def test_journal_entries_only_accept_known_kinds() -> None:
+    with pytest.raises(ValueError):
+        JournalEntry("registry", "HKLM/anything", None, "1")
+    with pytest.raises(ValueError):
+        JournalEntry("sysfs_authorized", "", "1", "0")
+
+
+def test_rndis_adapters_are_network_devices() -> None:
+    for triple in ((0xE0, 0x01, 0x03), (0xEF, 0x04, 0x01), (0x02, 0x02, 0xFF)):
+        assert UsbInterface(*triple).category is DeviceCategory.NETWORK
+
+
+def test_input_only_and_mixed_function_devices() -> None:
+    network = UsbInterface(0x02, 0x06, 0x00)
+    assert keyboard().is_input_only and mouse().is_input_only
+    assert not keyboard().mixes_input_with_other
+    assert not flash_drive().is_input_only and not flash_drive().mixes_input_with_other
+    assert not hub().is_input_only
+
+    stick = storage_with_keyboard()
+    assert stick.mixes_input_with_other and not stick.is_input_only
+
+    tap = make_device(interfaces=(UsbInterface(0x03, 0x01, 0x01), network))
+    assert tap.mixes_input_with_other and not tap.is_input_only and not tap.is_storage
+
+    docked = make_device(interfaces=(UsbInterface(0x09), UsbInterface(0x03, 0x01, 0x01)))
+    assert docked.is_input_only
+
+
+def test_phones_and_cameras_count_as_storage_like() -> None:
+    assert flash_drive().is_storage_like
+    assert phone().is_storage_like and not phone().is_storage
+    assert not keyboard().is_storage_like
+
+
+def test_device_supplied_text_is_made_safe() -> None:
+    escape, bell, override, zero_width = chr(0x1B), chr(0x07), chr(0x202E), chr(0x200B)
+    bad = chr(0xFFFD)
+    device = make_device(
+        product=f"Flash{escape}[2K{chr(13)}Allowed{bell}",
+        manufacturer=f"  Exa{zero_width}mple{override}  ",
+        serial="A" * 300,
+    )
+    assert device.product == f"Flash{bad}[2K{bad}Allowed{bad}"
+    assert device.manufacturer == f"Exa{bad}mple{bad}"
+    assert device.serial == "A" * 126
+    assert make_device(product="   ").product is None
+    accented = "Caf" + chr(0xE9) + " Drive"
+    assert make_device(product=accented).product == accented
+    with pytest.raises(ValueError):
+        make_device(product=123)
+
+
+def test_volume_text_is_made_safe_but_paths_are_kept() -> None:
+    volume = Volume("/dev/sdz1", mount_point="/media/x", label="DATA" + chr(0x1B) + "[31m")
+    assert volume.label == "DATA" + chr(0xFFFD) + "[31m"
+    assert volume.device_node == "/dev/sdz1" and volume.mount_point == "/media/x"
+
+
+def test_connection_id_is_carried_but_does_not_affect_equality() -> None:
+    first = make_device(connection_id="boot1:1:7")
+    second = make_device(connection_id="boot1:1:9")
+    assert first == second and hash(first) == hash(second)
+    assert UsbDevice.from_dict(first.to_dict()).connection_id == "boot1:1:7"
+
+
+def test_resync_events_carry_no_device_and_others_require_one() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    assert DeviceEvent(DeviceEventType.RESYNC, None, now).device is None
+    with pytest.raises(ValueError):
+        DeviceEvent(DeviceEventType.ARRIVED, None, now)
+    with pytest.raises(ValueError):
+        DeviceEvent(DeviceEventType.RESYNC, flash_drive(), now)

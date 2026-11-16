@@ -123,6 +123,10 @@ def _encode(value: Any, depth: int) -> str:
         for key in value:
             if not isinstance(key, str) or not _KEY_PATTERN.match(key):
                 raise CanonicalError("object keys must be printable ASCII strings")
+            # Harmless in Python, but the JavaScript implementation must refuse this key
+            # (it can swap an object's prototype), and both must accept the same set.
+            if key == "__proto__":
+                raise CanonicalError('the object key "__proto__" is not allowed')
         # Keys are ASCII, so code-point order is plain byte order.
         return (
             "{"

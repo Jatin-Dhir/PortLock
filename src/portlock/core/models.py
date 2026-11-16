@@ -9,6 +9,7 @@ talks to the operating system.
 from __future__ import annotations
 
 import enum
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,7 @@ __all__ = [
     "UsbDevice",
     "UsbInterface",
     "Volume",
+    "sanitize_device_text",
 ]
 
 
@@ -87,6 +89,9 @@ _HID_PROTOCOL_MOUSE = 0x02
 _CDC_SUBCLASS_ACM = 0x02
 # CDC subclasses that carry network traffic: ECM, EEM, NCM, MBIM.
 _CDC_NETWORK_SUBCLASSES = frozenset({0x06, 0x0C, 0x0D, 0x0E})
+# Network adapters that do not use a CDC networking subclass: RNDIS in its three common
+# spellings (wireless controller, miscellaneous, and the vendor protocol on CDC ACM).
+_NETWORK_TRIPLES = frozenset({(0xE0, 0x01, 0x03), (0xEF, 0x04, 0x01), (0x02, 0x02, 0xFF)})
 
 _CLASS_CATEGORIES: Mapping[int, DeviceCategory] = MappingProxyType(
     {
@@ -105,7 +110,14 @@ _CLASS_CATEGORIES: Mapping[int, DeviceCategory] = MappingProxyType(
 )
 
 
+_INPUT_CATEGORIES: frozenset[DeviceCategory] = frozenset(
+    {DeviceCategory.KEYBOARD, DeviceCategory.MOUSE, DeviceCategory.HID}
+)
+
+
 def _categorize(cls: int, subcls: int, protocol: int) -> DeviceCategory:
+    if (cls, subcls, protocol) in _NETWORK_TRIPLES:
+        return DeviceCategory.NETWORK
     if cls == UsbClass.HID:
         # Only boot-protocol devices declare what they are in the descriptor. Any other
         # HID device may still type like a keyboard; it is reported as plain HID and
@@ -127,6 +139,36 @@ def _categorize(cls: int, subcls: int, protocol: int) -> DeviceCategory:
 def _check_range(name: str, value: int, upper: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= upper:
         raise ValueError(f"{name} must be an integer between 0 and {upper:#x}, got {value!r}")
+
+
+#: A USB string descriptor holds at most 126 UTF-16 code units.
+_MAX_DEVICE_TEXT = 126
+_REPLACEMENT = chr(0xFFFD)
+# Control, format (including bidirectional overrides and zero-width characters),
+# surrogate, private-use and unassigned code points, and line and paragraph separators.
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
+def sanitize_device_text(value: object, *, limit: int = _MAX_DEVICE_TEXT) -> str | None:
+    """Make a string supplied by a device safe to store, log and display.
+
+    Descriptor strings, volume labels and the like are chosen by the device. Left alone,
+    an escape sequence in a product name could rewrite a line of a terminal listing and a
+    right-to-left override could disguise it. Every unsafe character is replaced with
+    U+FFFD (so it stays visible that something was there), surrounding whitespace is
+    removed and the result is capped at ``limit`` characters. An empty result is ``None``.
+
+    Raises:
+        ValueError: if ``value`` is neither a string nor ``None``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"device text must be a string or None, got {type(value).__name__}")
+    cleaned = "".join(
+        _REPLACEMENT if unicodedata.category(char) in _UNSAFE_CATEGORIES else char for char in value
+    ).strip()
+    return cleaned[:limit] or None
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -165,6 +207,13 @@ class Volume:
     fs_uuid: str | None = None
     size_bytes: int | None = None
     read_only: bool | None = None
+
+    def __post_init__(self) -> None:
+        # The label, filesystem name and UUID come from the device. The device node and
+        # mount point are left as the OS reports them because they are used as paths;
+        # consoles must still render them as text only.
+        for name in ("label", "fs_type", "fs_uuid"):
+            object.__setattr__(self, name, sanitize_device_text(getattr(self, name)))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -208,6 +257,10 @@ class UsbDevice:
         removable: ``True`` for an external port, ``False`` for a built-in device,
             ``None`` if the platform does not say.
         volumes: filesystems exposed by a storage device, when known.
+        connection_id: a token that differs for every physical connection, even of the
+            same device on the same port (``instance_id`` survives a re-plug on both
+            platforms). ``None`` if the backend cannot supply one. Ignored by equality,
+            hashing and fingerprinting.
         backend_data: opaque extras for the backend that produced this object. Ignored
             by equality, hashing and fingerprinting.
     """
@@ -224,6 +277,7 @@ class UsbDevice:
     bus_path: str | None = None
     removable: bool | None = None
     volumes: tuple[Volume, ...] = ()
+    connection_id: str | None = field(default=None, compare=False, hash=False)
     backend_data: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({}), compare=False, hash=False, repr=False
     )
@@ -236,6 +290,8 @@ class UsbDevice:
         _check_range("device_class", self.device_class, 0xFF)
         if self.bcd_device is not None:
             _check_range("bcd_device", self.bcd_device, 0xFFFF)
+        for name in ("serial", "manufacturer", "product"):
+            object.__setattr__(self, name, sanitize_device_text(getattr(self, name)))
         object.__setattr__(self, "interfaces", tuple(self.interfaces))
         object.__setattr__(self, "volumes", tuple(self.volumes))
         object.__setattr__(self, "backend_data", MappingProxyType(dict(self.backend_data)))
@@ -285,6 +341,35 @@ class UsbDevice:
         return self.is_storage and self.is_hid
 
     @property
+    def is_storage_like(self) -> bool:
+        """True for mass storage and for imaging devices.
+
+        A phone or camera in MTP or PTP mode is not mass storage, but it exposes files
+        in both directions all the same, so scope and lockdown treat the two alike.
+        """
+        return bool(self.categories & {DeviceCategory.STORAGE, DeviceCategory.IMAGING})
+
+    @property
+    def is_input_only(self) -> bool:
+        """True if the device is an input device and nothing else (hubs aside).
+
+        Only such a device qualifies for the category protection that keeps the
+        operator's keyboard and mouse working.
+        """
+        functions = self.categories - {DeviceCategory.HUB}
+        return bool(functions) and functions <= _INPUT_CATEGORIES
+
+    @property
+    def mixes_input_with_other(self) -> bool:
+        """True if an input interface sits beside any other function.
+
+        Storage that also types, or a keyboard that is also a network adapter: the shape
+        of a "BadUSB" stick or a network-tap implant.
+        """
+        functions = self.categories - {DeviceCategory.HUB}
+        return bool(functions & _INPUT_CATEGORIES) and not functions <= _INPUT_CATEGORIES
+
+    @property
     def vid_pid(self) -> str:
         """``vvvv:pppp`` in lowercase hex, the way ``lsusb`` prints it."""
         return f"{self.vendor_id:04x}:{self.product_id:04x}"
@@ -309,6 +394,7 @@ class UsbDevice:
             "interfaces": [interface.to_dict() for interface in self.interfaces],
             "bus_path": self.bus_path,
             "removable": self.removable,
+            "connection_id": self.connection_id,
             "volumes": [volume.to_dict() for volume in self.volumes],
             "categories": sorted(category.value for category in self.categories),
         }
@@ -328,6 +414,7 @@ class UsbDevice:
             interfaces=tuple(UsbInterface.from_dict(item) for item in data.get("interfaces", ())),
             bus_path=data.get("bus_path"),
             removable=data.get("removable"),
+            connection_id=data.get("connection_id"),
             volumes=tuple(Volume.from_dict(item) for item in data.get("volumes", ())),
         )
 
@@ -387,9 +474,9 @@ class DecisionSource(enum.StrEnum):
 
     SAFETY = "safety"
     LOCKDOWN = "lockdown"
+    SCAN = "scan"
     POLICY = "policy"
     GRANT = "grant"
-    SCAN = "scan"
     DEFAULT = "default"
 
 
@@ -448,15 +535,21 @@ class DeviceEventType(enum.StrEnum):
     REMOVED = "removed"
     #: Same connection, new information (typically a volume was mounted).
     CHANGED = "changed"
+    #: The backend may have missed events; the receiver must enumerate again.
+    RESYNC = "resync"
 
 
 @dataclass(frozen=True, slots=True)
 class DeviceEvent:
-    """Something a device backend observed."""
+    """Something a device backend observed. ``device`` is ``None`` only for ``RESYNC``."""
 
     type: DeviceEventType
-    device: UsbDevice
+    device: UsbDevice | None
     at: datetime
+
+    def __post_init__(self) -> None:
+        if (self.device is None) != (self.type is DeviceEventType.RESYNC):
+            raise ValueError("a device is required for every event type except RESYNC")
 
 
 class Mode(enum.StrEnum):

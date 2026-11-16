@@ -34,6 +34,7 @@ __all__ = [
     "EnforcerCapabilities",
     "EventCallback",
     "JournalEntry",
+    "JournalKind",
     "Tier",
 ]
 
@@ -62,6 +63,32 @@ class Action(enum.StrEnum):
     DEFAULT_DENY_ON = "default_deny_on"
     DEFAULT_DENY_OFF = "default_deny_off"
     RESTORE = "restore"
+
+
+class JournalKind(enum.StrEnum):
+    """Every kind of operating-system state PortLock may change, and therefore restore.
+
+    Restoring a journal is a privileged write. Keeping the kinds to a closed list, each
+    with a validated target, stops a tampered journal from being used to write anywhere
+    else.
+    """
+
+    #: ``authorized`` attribute of one USB device in sysfs. Target: the sysfs path.
+    SYSFS_AUTHORIZED = "sysfs_authorized"
+    #: ``authorized_default`` attribute of one USB host controller. Target: the sysfs path.
+    SYSFS_AUTHORIZED_DEFAULT = "sysfs_authorized_default"
+    #: Read-only flag of one block device. Target: the device node.
+    BLOCK_READ_ONLY = "block_read_only"
+    #: A udev rules file written by PortLock. Target: the file path.
+    UDEV_RULE = "udev_rule"
+    #: Enabled or disabled state of one Windows device node. Target: the instance id.
+    WIN_DEVNODE = "win_devnode"
+    #: Read-only attribute of one Windows disk. Target: the disk device path.
+    WIN_DISK_READ_ONLY = "win_disk_read_only"
+    #: One Windows policy registry value. Target: the key path and value name.
+    WIN_POLICY_VALUE = "win_policy_value"
+    #: State inside the in-memory fake enforcer. Target: free-form.
+    FAKE = "fake"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +125,7 @@ class JournalEntry:
     """One reversible change to operating-system state.
 
     Attributes:
-        kind: the mechanism family, e.g. ``sysfs``, ``registry``, ``devnode``.
+        kind: a :class:`JournalKind` value; anything else raises ``ValueError``.
         target: what was changed: a path, a registry value, a device instance id.
         previous: the value before the change, or ``None`` if there was none.
         applied: the value written, or ``None`` if the change was a removal.
@@ -108,6 +135,11 @@ class JournalEntry:
     target: str
     previous: str | None
     applied: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", JournalKind(self.kind).value)
+        if not isinstance(self.target, str) or not self.target:
+            raise ValueError("a journal entry needs a non-empty target")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,9 +216,12 @@ class DeviceBackend(ABC):
     def start(self, on_event: EventCallback) -> None:
         """Begin reporting arrivals, removals and changes to ``on_event``.
 
-        The callback is invoked from a backend thread. It must not be called for devices
-        that were already present at start; the caller enumerates those itself.
-        Calling ``start`` twice without ``stop`` is an error.
+        The callback is invoked from a backend thread. To leave no gap, the caller
+        starts the backend first and enumerates afterwards, so a device that arrives in
+        between may be reported both ways: handling an arrival must be idempotent per
+        connection. A backend that may have missed events (a notification queue
+        overflowed, the system resumed from sleep) reports ``RESYNC`` and the caller
+        enumerates again. Calling ``start`` twice without ``stop`` is an error.
         """
 
     @abstractmethod
@@ -233,4 +268,10 @@ class Enforcer(ABC):
 
     @abstractmethod
     def restore(self, entries: Sequence[JournalEntry]) -> EnforcementResult:
-        """Put back the ``previous`` value of each journal entry, newest first."""
+        """Put back the ``previous`` value of each journal entry, newest first.
+
+        An entry is reverted only if the current value still equals its ``applied``
+        value. If someone else has changed it since (a group policy refresh, an
+        administrator), it is left alone and reported in ``detail``. Every target is
+        validated against what its :class:`JournalKind` allows before anything is written.
+        """
