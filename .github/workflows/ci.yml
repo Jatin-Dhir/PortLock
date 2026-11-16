@@ -45,3 +45,22 @@ jobs:
       # No test in this suite calls an enforcement mechanism or changes a system
       # setting; see "Testing rules" in docs/DESIGN.md.
       - run: python -m pytest
+
+  live:
+    name: Live, read-only (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PortLock with its development tools
+        run: python -m pip install -e ".[dev]"
+      # These tests read the runner's real device tree and run the real service
+      # watch-only, under a flight recorder that refuses every program start, registry
+      # write and mutating operating-system call. They change nothing on the runner.
+      - run: python -m pytest --run-hardware tests/hardware
