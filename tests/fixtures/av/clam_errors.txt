@@ -1,0 +1,8 @@
+LibClamAV Warning: **************************************************
+LibClamAV Warning: ***  The virus database is older than 7 days!  ***
+LibClamAV Warning: **************************************************
+/media/test/EXAMPLE DRIVE/private/notes.txt: Access denied. ERROR
+/media/test/EXAMPLE DRIVE/gone.tmp: lstat() failed: No such file or directory. ERROR
+WARNING: Can't open file /media/test/EXAMPLE DRIVE/locked.db: Permission denied
+ERROR: Can't open /var/lib/clamav/daily.cld
+/media/test/EXAMPLE DRIVE/payload.dll: Win.Trojan.Example-42 FOUND

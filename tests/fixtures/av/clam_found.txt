@@ -1,0 +1,5 @@
+/media/test/EXAMPLE DRIVE/setup.exe: Win.Test.EICAR_HDB-1 FOUND
+/media/test/EXAMPLE DRIVE/My Files/report 2026: final.pdf.exe: Win.Trojan.Agent-1234567 FOUND
+/media/test/EXAMPLE DRIVE/Fotos/día de playa/señal.scr: Win.Worm.Example-99 FOUND
+/media/test/EXAMPLE DRIVE/tools/packed.bin: PUA.Win.Packer.Example-7 FOUND
+/media/test/EXAMPLE DRIVE/archive/locked.zip: Heuristics.Encrypted.Zip FOUND

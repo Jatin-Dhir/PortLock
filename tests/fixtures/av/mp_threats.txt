@@ -1,0 +1,17 @@
+Scan starting...
+Scan finished.
+Scanning F:\usb volume found 2 threats.
+
+<===========================LIST OF DETECTED THREATS==========================>
+----------------------------- Threat information ------------------------------
+Threat                  : Virus:DOS/EICAR_Test_File
+Resources               : 3 total
+    file                : F:\usb volume\tools\test file.com
+    containerfile       : F:\usb volume\backups\old archive.zip
+    file                : F:\usb volume\backups\old archive.zip->inner/test.com
+-------------------------------------------------------------------------------
+----------------------------- Threat information ------------------------------
+Threat                  : PUA:Win32/ExampleBundler
+Resources               : 1 total
+    file                : F:\usb volume\Descargas\instalación.exe
+-------------------------------------------------------------------------------

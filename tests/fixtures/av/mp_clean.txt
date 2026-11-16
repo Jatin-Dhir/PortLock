@@ -1,0 +1,3 @@
+Scan starting...
+Scan finished.
+Scanning F:\usb volume found no threats.
