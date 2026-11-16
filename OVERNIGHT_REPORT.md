@@ -175,7 +175,9 @@ the test, fixed in `36012b4`). The fourth pass (`c7484fb`) then passed the same 
   connection that was not present at start, of category storage with one mounted volume,
   in state pending under the default policy, and one `enforcement.would_apply` audit
   record: what it would have done, with nothing blocked.
-- **Not done:** a device removed while the real service runs.
+- The same device was then unplugged: it left the connected list, and the service
+  recorded the connection as closed with the reason `removed` and one `device.removed`
+  audit record. One arrival and one removal is all that has been seen.
 - **Not verified:** any enforcement mechanism on a real device; the generated systemd unit
   (never loaded by systemd); the Windows scheduled-task and `icacls` command lines (marked
   UNVERIFIED in the code); `portlock doctor`, `run` and `status` on an elevated,

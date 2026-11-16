@@ -85,7 +85,8 @@ Demonstrated:
   pending. The service's own records, read afterwards without identifiers, show one
   connection that was not present at start, of category storage with one mounted volume,
   in state pending under the default policy, and one `enforcement.would_apply` audit
-  record: what it would have done, with nothing blocked.
+  record: what it would have done, with nothing blocked. Unplugged, it left the connected list, and the service recorded the
+  connection as closed with the reason `removed` and one `device.removed` audit record.
 
 Not demonstrated:
 
@@ -103,9 +104,8 @@ Not demonstrated:
   private with `icacls` at every start; none of that was done. As an ordinary user it runs
   watch-only, probes nothing and runs no command; that was run on one Windows machine.
   Under WSL it ran and said what it should: no USB bus, not root.
-- **A device removed while the real service runs**, and any arrival beyond the single one
-  listed above. The live tests list the devices that are present and never see one
-  arrive.
+- **More than the one arrival and one removal listed above.** The live tests list the
+  devices that are present and never see one arrive or leave.
 - **A Windows with a display language other than English.** The directory-privacy check
   reads the names `icacls` prints; on another language it reports the directory as not
   private and refuses enforce mode (it fails closed), but this was not tried.

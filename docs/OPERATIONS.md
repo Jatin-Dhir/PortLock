@@ -130,8 +130,8 @@ bound. The same checks are the test `tests/hardware/test_watch_only_live.py`
 is no USB bus, under WSL. The console was opened in a browser against that service. Since then the owner has set it up by typing the password at the prompt and plugged a
 USB storage device in while it ran: it appeared in the console as pending, and the
 service recorded a storage device with one mounted volume, not present at start, and
-one `enforcement.would_apply`. Not done: unplugging a device while the real service
-runs, and anything as administrator.
+one `enforcement.would_apply`. Unplugged, it left the list, and the service recorded the connection as closed
+(`removed`) and one `device.removed`. Not done: anything as administrator.
 
 ## 1. Where things are
 
