@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "name": "Office policy",
+  "default": {"access": "pending", "scan": "on_mount"},
+  "rules": [
+    {
+      "id": "deny-badusb",
+      "description": "Storage with an input interface.",
+      "match": {"storage_with_input": true},
+      "action": {"access": "deny", "alert": true}
+    },
+    {
+      "id": "deny-vendors",
+      "match": {"vendor_id": ["0x1209", "0x1234"], "product_id": "0005"},
+      "action": {"access": "deny"}
+    },
+    {
+      "id": "office-hours",
+      "enabled": true,
+      "expires": "2027-01-01T00:00:00Z",
+      "match": {
+        "manufacturer": "Example Corp*",
+        "serial": ["TEST????A7C3", "TEST0002*"],
+        "category": "storage",
+        "interface_class": ["0x08"],
+        "confidence": "high",
+        "composite": false,
+        "removable": true,
+        "bus_path": ["1-1", "1-1.*"],
+        "time": {
+          "days": ["mon", "tue", "wed", "thu", "fri"],
+          "start": "09:00",
+          "end": "17:30",
+          "utc_offset_minutes": 60
+        }
+      },
+      "action": {"access": "allow", "scan": "required", "alert": false}
+    },
+    {
+      "id": "known-stick",
+      "enabled": false,
+      "expires": null,
+      "match": {
+        "fingerprint": "plk1:abcdefghijklmnopqrstuvwxyz234567",
+        "product": "*Flash*"
+      },
+      "action": {"access": "read_only"}
+    }
+  ],
+  "scan": {"on_detection": "read_only"}
+}

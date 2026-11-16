@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "nmae": "typo in a key",
+  "default": {"access": "maybe"},
+  "rules": [
+    {
+      "id": "ok-rule",
+      "match": {"vendor_id": "0x1209"},
+      "action": {"access": "deny"}
+    },
+    {
+      "id": "OK-RULE",
+      "match": {"vendor_id": "0x12345", "serial": "", "colour": "red"},
+      "action": {"access": "deny", "alert": "yes"}
+    },
+    {
+      "id": "empty",
+      "match": {},
+      "action": {"access": "allow"}
+    }
+  ]
+}

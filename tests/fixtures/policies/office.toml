@@ -1,0 +1,64 @@
+# The same policy as office.json, written the way a person would write TOML.
+version = 1
+name = "Office policy"
+
+[default]
+access = "pending"
+scan = "on_mount"
+
+[scan]
+on_detection = "read_only"
+
+[[rules]]
+id = "deny-badusb"
+description = "Storage with an input interface."
+match = { storage_with_input = true }
+action = { access = "deny", alert = true }
+
+[[rules]]
+id = "deny-vendors"
+
+[rules.match]
+vendor_id = ["0x1209", "0x1234"]
+product_id = "0005"
+
+[rules.action]
+access = "deny"
+
+[[rules]]
+id = "office-hours"
+enabled = true
+# A TOML date-time with an offset; it is the same instant as 2027-01-01T00:00:00Z.
+expires = 2027-01-01T01:00:00+01:00
+
+[rules.match]
+manufacturer = "Example Corp*"
+serial = ["TEST????A7C3", "TEST0002*"]
+category = "storage"
+interface_class = [8]
+confidence = "high"
+composite = false
+removable = true
+bus_path = ["1-1", "1-1.*"]
+
+[rules.match.time]
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = 09:00:00
+end = 17:30:00
+utc_offset_minutes = 60
+
+[rules.action]
+access = "allow"
+scan = "required"
+alert = false
+
+[[rules]]
+id = "known-stick"
+enabled = false
+
+[rules.match]
+fingerprint = "plk1:abcdefghijklmnopqrstuvwxyz234567"
+product = "*Flash*"
+
+[rules.action]
+access = "read_only"

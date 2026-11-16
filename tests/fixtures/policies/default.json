@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "PortLock default policy",
+  "default": {
+    "access": "pending",
+    "scan": "on_mount",
+    "alert": false
+  },
+  "rules": [
+    {
+      "id": "deny-input-with-other",
+      "description": "A keyboard, mouse or other input interface beside any other function (storage, network, serial, vendor-specific) is the shape of a BadUSB stick or a network implant. Denied, with an alert. A grant cannot override a rule; to permit such a device, put a more specific rule above this one.",
+      "enabled": true,
+      "expires": null,
+      "match": {
+        "mixes_input_with_other": true
+      },
+      "action": {
+        "access": "deny",
+        "scan": "none",
+        "alert": true
+      }
+    }
+  ],
+  "scan": {
+    "on_detection": "deny",
+    "on_incomplete": "read_only"
+  }
+}

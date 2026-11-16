@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "default": {"access": "deny", "access": "allow"}
+}
