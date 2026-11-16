@@ -1,0 +1,94 @@
+/*
+ * PortLock console: design tokens.
+ *
+ * The one idea: the console must always say whether PortLock is LOOKING or BLOCKING, and be
+ * honest about what is only intended. The visual grammar that carries it is
+ *   solid  = in force, the operating system really was changed;
+ *   dashed = intended only (monitor mode), nothing was changed.
+ * Every state is also written out in words, never colour alone. Boldness is spent in one
+ * place, the posture band on the overview; everything else is quiet, dense and legible.
+ *
+ * System fonts only: the content security policy allows no font file and no other host.
+ */
+:root {
+  color-scheme: dark light;
+
+  /* surfaces and text (dark is the default: an operator tool is often left open on a wall) */
+  --bg: #0d1013;
+  --surface: #141a20;
+  --surface-2: #1b232b;
+  --line-soft: #26303a;
+  --line: #3a4753;
+  --control: #7d8c9a;
+  --text: #e8edf2;
+  --text-2: #a7b3bf;
+  --text-3: #8593a0;
+  --focus: #8ab4f8;
+
+  /* meaning */
+  --watch: #8ab4f8;
+  --enforce: #3fd0a9;
+  --lock: #ff7a6d;
+  --pending: #f5b942;
+  --allow: #6ed699;
+  --readonly: #5ccfe6;
+  --deny: #ff7a6d;
+  --on-fill: #06110e;
+
+  /* type */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.8125rem;
+  --fs-md: 0.875rem;
+  --fs-lg: 1rem;
+  --fs-xl: 1.25rem;
+  --fs-2xl: 1.75rem;
+  --fs-clock: 3rem;
+
+  /* spacing (4px base) */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  --radius: 4px;
+  --rail: 13.5rem;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t-med: 220ms;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f4f6;
+    --surface: #ffffff;
+    --surface-2: #e9edf0;
+    --line-soft: #d3d9df;
+    --line: #8a96a2;
+    --control: #6c7885;
+    --text: #141c24;
+    --text-2: #434f5b;
+    --text-3: #586471;
+    --focus: #1a56b0;
+
+    --watch: #1a56b0;
+    --enforce: #0a7059;
+    --lock: #b8281b;
+    --pending: #7d5200;
+    --allow: #16703b;
+    --readonly: #0a6479;
+    --deny: #b8281b;
+    --on-fill: #ffffff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-med: 0ms;
+  }
+}
