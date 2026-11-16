@@ -118,7 +118,7 @@ this was written.
 
 ## 8. Git commits created
 
-18 commits, from `35777d0` (retire the prototype) to `e5ffa8e` (HTTP API, CLI, simulator),
+17 commits, from `35777d0` (retire the prototype) to `e5ffa8e` (HTTP API, CLI, simulator),
 plus the commit that adds this report. `git log main..claude/overnight-security-framework`
 lists them; each is one logical unit.
 
