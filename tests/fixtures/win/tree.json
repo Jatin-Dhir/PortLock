@@ -1,0 +1,868 @@
+{
+ "_comment": "Synthetic device tree. Vendor id 0x1209 is the pid.codes test range; serials start with TEST. Nothing here was read from a real machine.",
+ "nodes": [
+  {
+   "id": "PCI\\VEN_FFFF&DEV_0001&SUBSYS_00000000&REV_00\\3&00000000&0&A0",
+   "parent": null,
+   "status": 25174026,
+   "problem": 0,
+   "props": {
+    "service": "USBXHCI",
+    "device_desc": "Example xHCI Host Controller"
+   }
+  },
+  {
+   "id": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "parent": "PCI\\VEN_FFFF&DEV_0001&SUBSYS_00000000&REV_00\\3&00000000&0&A0",
+   "status": 25165834,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\ROOT_HUB30&VIDFFFF&PID0001&REV0000",
+     "USB\\ROOT_HUB30&VIDFFFF&PID0001",
+     "USB\\ROOT_HUB30"
+    ],
+    "service": "USBHUB3",
+    "device_desc": "USB Root Hub (USB 3.0)",
+    "manufacturer": "(Standard USB HUBs)",
+    "capabilities": 128,
+    "removal_policy": 1,
+    "address": 0,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{00000000-0000-0000-ffff-ffffffffffff}",
+    "last_arrival": 134000000000000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0001\\TEST0001A7C3",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0001&REV_0100",
+     "USB\\VID_1209&PID_0001"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ],
+    "service": "USBSTOR",
+    "device_desc": "USB Mass Storage Device",
+    "bus_desc": "Example Flash 16GB",
+    "manufacturer": "Compatible USB storage device",
+    "capabilities": 148,
+    "removal_policy": 3,
+    "address": 1,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(1)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS01)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-000000000001}",
+    "last_arrival": 134000000010000000
+   }
+  },
+  {
+   "id": "USBSTOR\\DISK&VEN_EXAMPLE&PROD_FLASH_16GB&REV_1.00\\TEST0001A7C3&0",
+   "parent": "USB\\VID_1209&PID_0001\\TEST0001A7C3",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "service": "disk",
+    "device_desc": "Disk drive",
+    "class_guid": "{4d36e967-e325-11ce-bfc1-08002be10318}",
+    "removal_policy": 3,
+    "capabilities": 144,
+    "disk_interfaces": {
+     "{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+      "\\\\?\\usbstor#disk&ven_example&prod_flash_16gb&rev_1.00#test0001a7c3&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}"
+     ]
+    }
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0002\\5&1a2b3c4d&0&2",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0002&REV_0211",
+     "USB\\VID_1209&PID_0002"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01&Prot_01",
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01",
+     "USB\\COMPAT_VID_1209&Class_03",
+     "USB\\Class_03&SubClass_01&Prot_01",
+     "USB\\Class_03&SubClass_01",
+     "USB\\Class_03"
+    ],
+    "service": "HidUsb",
+    "device_desc": "USB Input Device",
+    "bus_desc": "Example Keyboard",
+    "manufacturer": "(Standard system devices)",
+    "capabilities": 132,
+    "removal_policy": 3,
+    "address": 2,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(2)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS02)"
+    ],
+    "class_guid": "{745a17a0-74d3-11d0-b6fe-00a0c90f57da}",
+    "container_id": "{11111111-0000-4000-8000-000000000002}",
+    "last_arrival": 134000000020000000
+   }
+  },
+  {
+   "id": "HID\\VID_1209&PID_0002\\6&5e6f7081&0&0000",
+   "parent": "USB\\VID_1209&PID_0002\\5&1a2b3c4d&0&2",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "service": "kbdhid",
+    "device_desc": "HID Keyboard Device",
+    "class_guid": "{4d36e96b-e325-11ce-bfc1-08002be10318}",
+    "removal_policy": 3,
+    "capabilities": 128
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0008\\5&1a2b3c4d&0&3",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25165834,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0008&REV_2411",
+     "USB\\VID_1209&PID_0008"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&DevClass_00&SubClass_00&Prot00",
+     "USB\\COMPAT_VID_1209&DevClass_00&SubClass_00",
+     "USB\\COMPAT_VID_1209&DevClass_00",
+     "USB\\DevClass_00&SubClass_00&Prot_00",
+     "USB\\DevClass_00&SubClass_00",
+     "USB\\DevClass_00",
+     "USB\\COMPOSITE"
+    ],
+    "service": "usbccgp",
+    "device_desc": "USB Composite Device",
+    "bus_desc": "Example Receiver",
+    "manufacturer": "(Standard USB Host Controller)",
+    "capabilities": 132,
+    "removal_policy": 3,
+    "address": 3,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS03)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-000000000008}",
+    "last_arrival": 134000000030000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0008&MI_02\\6&6f708192&0&0002",
+   "parent": "USB\\VID_1209&PID_0008\\5&1a2b3c4d&0&3",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0008&REV_2411&MI_02",
+     "USB\\VID_1209&PID_0008&MI_02"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_00&Prot_00",
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_00",
+     "USB\\COMPAT_VID_1209&Class_03",
+     "USB\\Class_03&SubClass_00&Prot_00",
+     "USB\\Class_03&SubClass_00",
+     "USB\\Class_03"
+    ],
+    "service": "HidUsb",
+    "bus_desc": "Example Receiver",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "address": 2,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)#USBMI(2)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS03)#USBMI(2)"
+    ],
+    "class_guid": "{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0008&MI_00\\6&6f708192&0&0000",
+   "parent": "USB\\VID_1209&PID_0008\\5&1a2b3c4d&0&3",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0008&REV_2411&MI_00",
+     "USB\\VID_1209&PID_0008&MI_00"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01&Prot_01",
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01",
+     "USB\\COMPAT_VID_1209&Class_03",
+     "USB\\Class_03&SubClass_01&Prot_01",
+     "USB\\Class_03&SubClass_01",
+     "USB\\Class_03"
+    ],
+    "service": "HidUsb",
+    "bus_desc": "Example Receiver",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "address": 0,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)#USBMI(0)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS03)#USBMI(0)"
+    ],
+    "class_guid": "{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0008&MI_01\\6&6f708192&0&0001",
+   "parent": "USB\\VID_1209&PID_0008\\5&1a2b3c4d&0&3",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0008&REV_2411&MI_01",
+     "USB\\VID_1209&PID_0008&MI_01"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01&Prot_02",
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01",
+     "USB\\COMPAT_VID_1209&Class_03",
+     "USB\\Class_03&SubClass_01&Prot_02",
+     "USB\\Class_03&SubClass_01",
+     "USB\\Class_03"
+    ],
+    "service": "HidUsb",
+    "bus_desc": "Example Receiver",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "address": 1,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)#USBMI(1)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS03)#USBMI(1)"
+    ],
+    "class_guid": "{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0004\\5&1a2b3c4d&0&4",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0004&REV_0090",
+     "USB\\VID_1209&PID_0004"
+    ],
+    "compatible_ids": [
+     "USB\\DevClass_09&SubClass_00&Prot_01",
+     "USB\\DevClass_09&SubClass_00",
+     "USB\\DevClass_09",
+     "USB\\USB20_HUB"
+    ],
+    "service": "USBHUB3",
+    "device_desc": "Generic USB Hub",
+    "bus_desc": "Example Hub",
+    "manufacturer": "(Standard USB HUBs)",
+    "capabilities": 132,
+    "removal_policy": 3,
+    "address": 4,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(4)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS04)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-000000000004}",
+    "last_arrival": 134000000040000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0010\\TEST0010UASP",
+   "parent": "USB\\VID_1209&PID_0004\\5&1a2b3c4d&0&4",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0010&REV_0318",
+     "USB\\VID_1209&PID_0010"
+    ],
+    "compatible_ids": [
+     "USB\\Class_08&SubClass_06&Prot_62",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ],
+    "service": "UASPStor",
+    "device_desc": "USB Attached SCSI (UAS) Mass Storage Device",
+    "bus_desc": "Example Enclosure",
+    "manufacturer": "(Standard USB Host Controller)",
+    "capabilities": 148,
+    "removal_policy": 3,
+    "address": 2,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(4)#USB(2)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS04)#USB(2)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-000000000010}",
+    "last_arrival": 134000000050000000
+   }
+  },
+  {
+   "id": "SCSI\\DISK&VEN_EXAMPLE&PROD_ENCLOSURE\\7&2b3c4d5e&0&000000",
+   "parent": "USB\\VID_1209&PID_0010\\TEST0010UASP",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "service": "disk",
+    "device_desc": "Disk drive",
+    "class_guid": "{4d36e967-e325-11ce-bfc1-08002be10318}",
+    "removal_policy": 2,
+    "capabilities": 128,
+    "disk_interfaces": {
+     "{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+      "\\\\?\\scsi#disk&ven_example&prod_enclosure#7&2b3c4d5e&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}"
+     ]
+    }
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0006\\TEST0006PH0N",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0006&REV_0404",
+     "USB\\VID_1209&PID_0006"
+    ],
+    "compatible_ids": [
+     "USB\\MS_COMP_MTP",
+     "USB\\Class_06&SubClass_01&Prot_01",
+     "USB\\Class_06&SubClass_01",
+     "USB\\Class_06"
+    ],
+    "service": "WUDFWpdMtp",
+    "device_desc": "Example Phone",
+    "bus_desc": "Example Phone",
+    "manufacturer": "Example Mobile",
+    "capabilities": 148,
+    "removal_policy": 3,
+    "address": 5,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(5)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS05)"
+    ],
+    "class_guid": "{eec5ad98-8080-425f-922a-dabf3de3f69a}",
+    "container_id": "{11111111-0000-4000-8000-000000000006}",
+    "last_arrival": 134000000060000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0007\\TEST0007CAM0",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25174026,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0007&REV_0012",
+     "USB\\VID_1209&PID_0007"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&DevClass_EF&SubClass_02&Prot01",
+     "USB\\COMPAT_VID_1209&DevClass_EF&SubClass_02",
+     "USB\\COMPAT_VID_1209&DevClass_EF",
+     "USB\\DevClass_EF&SubClass_02&Prot_01",
+     "USB\\DevClass_EF&SubClass_02",
+     "USB\\DevClass_EF",
+     "USB\\COMPOSITE"
+    ],
+    "service": "usbccgp",
+    "device_desc": "USB Composite Device",
+    "bus_desc": "Integrated Camera",
+    "manufacturer": "(Standard USB Host Controller)",
+    "capabilities": 16,
+    "removal_policy": 1,
+    "address": 7,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(7)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS07)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{00000000-0000-0000-ffff-ffffffffffff}",
+    "last_arrival": 134000000000000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0007&MI_00\\6&708192a3&0&0000",
+   "parent": "USB\\VID_1209&PID_0007\\TEST0007CAM0",
+   "status": 25174026,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0007&REV_0012&MI_00",
+     "USB\\VID_1209&PID_0007&MI_00"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_0e&SubClass_03&Prot_00",
+     "USB\\COMPAT_VID_1209&Class_0e&SubClass_03",
+     "USB\\COMPAT_VID_1209&Class_0e",
+     "USB\\Class_0e&SubClass_03&Prot_00",
+     "USB\\Class_0e&SubClass_03",
+     "USB\\Class_0e"
+    ],
+    "service": "usbvideo",
+    "bus_desc": "Integrated Camera",
+    "removal_policy": 1,
+    "capabilities": 4,
+    "address": 0,
+    "class_guid": "{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}"
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0009\\5&1a2b3c4d&0&6",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25175040,
+   "problem": 22,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0009&REV_0001",
+     "USB\\VID_1209&PID_0009"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_E0&SubClass_01&Prot_01",
+     "USB\\COMPAT_VID_1209&Class_E0&SubClass_01",
+     "USB\\COMPAT_VID_1209&Class_E0",
+     "USB\\Class_E0&SubClass_01&Prot_01",
+     "USB\\Class_E0&SubClass_01",
+     "USB\\Class_E0"
+    ],
+    "device_desc": "Example Radio",
+    "manufacturer": "Example Wireless Inc.",
+    "capabilities": 132,
+    "removal_policy": 3,
+    "address": 6,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(6)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS06)"
+    ],
+    "class_guid": "{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}",
+    "container_id": "{11111111-0000-4000-8000-000000000009}",
+    "last_arrival": 134000000070000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0005\\TEST0005BAD1",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0005&REV_0100",
+     "USB\\VID_1209&PID_0005"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&DevClass_00&SubClass_00&Prot00",
+     "USB\\COMPAT_VID_1209&DevClass_00&SubClass_00",
+     "USB\\COMPAT_VID_1209&DevClass_00",
+     "USB\\DevClass_00&SubClass_00&Prot_00",
+     "USB\\DevClass_00&SubClass_00",
+     "USB\\DevClass_00",
+     "USB\\COMPOSITE"
+    ],
+    "service": "usbccgp",
+    "device_desc": "USB Composite Device",
+    "bus_desc": "Example Flash 16GB",
+    "manufacturer": "(Standard USB Host Controller)",
+    "capabilities": 148,
+    "removal_policy": 3,
+    "address": 8,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(8)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS08)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-000000000005}",
+    "last_arrival": 134000000080000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0005&MI_00\\6&3c4d5e6f&0&0000",
+   "parent": "USB\\VID_1209&PID_0005\\TEST0005BAD1",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0005&REV_0100&MI_00",
+     "USB\\VID_1209&PID_0005&MI_00"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ],
+    "service": "USBSTOR",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "address": 0,
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}"
+   }
+  },
+  {
+   "id": "USBSTOR\\DISK&VEN_EXAMPLE&PROD_FLASH_16GB&REV_1.00\\7&4d5e6f70&0&TEST0005BAD1&0",
+   "parent": "USB\\VID_1209&PID_0005&MI_00\\6&3c4d5e6f&0&0000",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "service": "disk",
+    "device_desc": "Disk drive",
+    "class_guid": "{4d36e967-e325-11ce-bfc1-08002be10318}",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "disk_interfaces": {
+     "{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+      "\\\\?\\usbstor#disk&ven_example&prod_flash_16gb&rev_1.00#7&4d5e6f70&0&test0005bad1&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}"
+     ]
+    }
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_0005&MI_01\\6&3c4d5e6f&0&0001",
+   "parent": "USB\\VID_1209&PID_0005\\TEST0005BAD1",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_0005&REV_0100&MI_01",
+     "USB\\VID_1209&PID_0005&MI_01"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01&Prot_01",
+     "USB\\COMPAT_VID_1209&Class_03&SubClass_01",
+     "USB\\COMPAT_VID_1209&Class_03",
+     "USB\\Class_03&SubClass_01&Prot_01",
+     "USB\\Class_03&SubClass_01",
+     "USB\\Class_03"
+    ],
+    "service": "HidUsb",
+    "removal_policy": 3,
+    "capabilities": 128,
+    "address": 1,
+    "class_guid": "{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_000A\\0123456789AB",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_000A&REV_0100",
+     "USB\\VID_1209&PID_000A"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_FF&SubClass_00&Prot_00",
+     "USB\\COMPAT_VID_1209&Class_FF&SubClass_00",
+     "USB\\COMPAT_VID_1209&Class_FF",
+     "USB\\Class_FF&SubClass_00&Prot_00",
+     "USB\\Class_FF&SubClass_00",
+     "USB\\Class_FF"
+    ],
+    "service": "WINUSB",
+    "device_desc": "Example Gadget",
+    "bus_desc": "Example Gadget",
+    "capabilities": 132,
+    "removal_policy": 3,
+    "address": 9,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(9)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS09)"
+    ],
+    "container_id": "{11111111-0000-4000-8000-00000000000a}",
+    "last_arrival": 134000000090000000
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_000B\\TEST000BCARD",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "hardware_ids": [
+     "USB\\VID_1209&PID_000B&REV_0100",
+     "USB\\VID_1209&PID_000B"
+    ],
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ],
+    "service": "USBSTOR",
+    "device_desc": "USB Mass Storage Device",
+    "bus_desc": "Example Card Reader",
+    "manufacturer": "Compatible USB storage device",
+    "capabilities": 148,
+    "removal_policy": 3,
+    "address": 10,
+    "location_paths": [
+     "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(10)",
+     "ACPI(_SB_)#ACPI(PCI0)#ACPI(XHC_)#ACPI(RHUB)#ACPI(HS10)"
+    ],
+    "class_guid": "{36fc9e60-c465-11cf-8056-444553540000}",
+    "container_id": "{11111111-0000-4000-8000-00000000000b}",
+    "last_arrival": 134000000100000000
+   }
+  },
+  {
+   "id": "USBSTOR\\DISK&VEN_EXAMPLE&PROD_CARD_READER&REV_1.00\\TEST000BCARD&0",
+   "parent": "USB\\VID_1209&PID_000B\\TEST000BCARD",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "service": "disk",
+    "device_desc": "Disk drive",
+    "class_guid": "{4d36e967-e325-11ce-bfc1-08002be10318}",
+    "removal_policy": 3,
+    "capabilities": 144,
+    "disk_interfaces": {
+     "{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+      "\\\\?\\usbstor#disk&ven_example&prod_card_reader&rev_1.00#test000bcard&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}"
+     ]
+    }
+   }
+  },
+  {
+   "id": "USB\\VID_12G9&PID_0001\\TESTBADHEX",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ]
+   }
+  },
+  {
+   "id": "USB\\VID_1209\\TESTNOPID",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ]
+   }
+  },
+  {
+   "id": "USB\\VID_1209&PID_00FF\\HAS SPACE",
+   "parent": "USB\\ROOT_HUB30\\4&0a0b0c0d&0&0",
+   "status": 25190410,
+   "problem": 0,
+   "props": {
+    "compatible_ids": [
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06&Prot_50",
+     "USB\\COMPAT_VID_1209&Class_08&SubClass_06",
+     "USB\\COMPAT_VID_1209&Class_08",
+     "USB\\Class_08&SubClass_06&Prot_50",
+     "USB\\Class_08&SubClass_06",
+     "USB\\Class_08"
+    ]
+   }
+  }
+ ],
+ "volumes": [
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000001}\\",
+   "device": [
+    7,
+    0,
+    3
+   ],
+   "extents": [
+    0
+   ],
+   "mount_points": [
+    "C:\\"
+   ],
+   "info": {
+    "label": "System",
+    "serial": 168496141,
+    "flags": 65472255,
+    "filesystem": "NTFS"
+   },
+   "total_bytes": 256000000000
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000002}\\",
+   "device": [
+    7,
+    2,
+    1
+   ],
+   "extents": [
+    2
+   ],
+   "mount_points": [
+    "E:\\"
+   ],
+   "info": {
+    "label": "EXAMPLE",
+    "serial": 439041101,
+    "flags": 6,
+    "filesystem": "FAT32"
+   },
+   "total_bytes": 16000000000
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000003}\\",
+   "device": [
+    7,
+    3,
+    2
+   ],
+   "extents": [
+    3
+   ],
+   "mount_points": [
+    "C:\\Mounts\\Enclosure\\",
+    "G:\\",
+    "F:\\"
+   ],
+   "info": {
+    "label": "",
+    "serial": 1,
+    "flags": 65472255,
+    "filesystem": "NTFS"
+   },
+   "total_bytes": 480000000000
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000004}\\",
+   "device": [
+    7,
+    3,
+    3
+   ],
+   "extents": [
+    3
+   ],
+   "mount_points": [],
+   "info": {
+    "label": "ARCHIVE",
+    "serial": 4294901760,
+    "flags": 524294,
+    "filesystem": "exFAT"
+   },
+   "total_bytes": 20000000000
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000005}\\",
+   "device": [
+    7,
+    4,
+    1
+   ],
+   "extents": [
+    4
+   ],
+   "mount_points": [
+    "H:\\"
+   ],
+   "info": {
+    "label": "PAYLOAD",
+    "serial": 195948557,
+    "flags": 6,
+    "filesystem": "FAT32"
+   },
+   "total_bytes": 16000000000
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000006}\\",
+   "device": [
+    7,
+    5,
+    null
+   ],
+   "extents": [],
+   "mount_points": [
+    "I:\\"
+   ],
+   "info": null,
+   "total_bytes": null
+  },
+  {
+   "name": "\\\\?\\Volume{00000000-0000-4000-8000-000000000007}\\",
+   "device": null,
+   "extents": [
+    6,
+    7
+   ],
+   "mount_points": [
+    "S:\\"
+   ],
+   "info": {
+    "label": "Spanned",
+    "serial": 305419896,
+    "flags": 65472255,
+    "filesystem": "NTFS"
+   },
+   "total_bytes": 4000000000000
+  }
+ ],
+ "device_numbers": {
+  "\\\\?\\usbstor#disk&ven_example&prod_flash_16gb&rev_1.00#test0001a7c3&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+   7,
+   2,
+   0
+  ],
+  "\\\\?\\scsi#disk&ven_example&prod_enclosure#7&2b3c4d5e&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+   7,
+   3,
+   0
+  ],
+  "\\\\?\\usbstor#disk&ven_example&prod_flash_16gb&rev_1.00#7&4d5e6f70&0&test0005bad1&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+   7,
+   4,
+   0
+  ],
+  "\\\\?\\usbstor#disk&ven_example&prod_card_reader&rev_1.00#test000bcard&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}": [
+   7,
+   5,
+   0
+  ]
+ }
+}
