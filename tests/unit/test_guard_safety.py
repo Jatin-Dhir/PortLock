@@ -128,6 +128,7 @@ def test_stable_codes() -> None:
         "dry-run",
         "error",
     )
+    assert safety_module.MECHANISM_UNSUPPORTED == "unsupported"
 
 
 def test_an_ordinary_flash_drive_is_not_protected_and_is_in_every_scope() -> None:
@@ -945,6 +946,81 @@ def test_constructor_arguments_are_checked() -> None:
         guard.set_read_only(flash_drive(), 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         guard.set_default_deny("on")  # type: ignore[arg-type]
+
+
+# --- SafeEnforcer: the standing read-only baseline -------------------------------------
+
+
+class _BaselineEnforcer(_BrokenEnforcer):
+    """An enforcer that offers the baseline, recording what it was asked."""
+
+    def __init__(self, behaviour: Callable[[], Any]) -> None:
+        super().__init__(behaviour)
+        self.asked: list[bool] = []
+
+    def set_baseline_read_only(self, enabled: bool) -> EnforcementResult:
+        self.asked.append(enabled)
+        return self._act()
+
+
+def _baseline_result(action: Action) -> EnforcementResult:
+    return EnforcementResult(
+        action=action, ok=True, mechanism="udev-rule", tier=Tier.PREVENTIVE, changed=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "action"), [(True, Action.READ_ONLY), (False, Action.READ_WRITE)]
+)
+def test_the_baseline_passes_through_without_a_protection_check(
+    enabled: bool, action: Action
+) -> None:
+    inner = _BaselineEnforcer(lambda: _baseline_result(action))
+    refusals: list[tuple[UsbDevice, Action, ProtectionVerdict]] = []
+    result = _guard(inner, refusals=refusals).set_baseline_read_only(enabled)
+    assert result == _baseline_result(action)
+    assert inner.asked == [enabled]
+    assert refusals == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_baseline_in_dry_run_reaches_nothing(enabled: bool) -> None:
+    inner = _BaselineEnforcer(_raise(AssertionError("dry-run must not reach the enforcer")))
+    result = _guard(inner, dry_run=True).set_baseline_read_only(enabled)
+    assert result.ok is True and result.mechanism == "dry-run" and result.changed is False
+    assert result.action is (Action.READ_ONLY if enabled else Action.READ_WRITE)
+    assert result.detail.startswith("dry-run: ") and "baseline" in result.detail
+    assert inner.asked == [] and inner.reached == 0
+
+
+def test_the_baseline_on_an_enforcer_without_one_is_reported_as_unsupported() -> None:
+    inner = FakeEnforcer()
+    assert not hasattr(inner, "set_baseline_read_only")
+    result = _guard(inner).set_baseline_read_only(True)
+    assert result.ok is False and result.mechanism == "unsupported"
+    assert result.action is Action.READ_ONLY
+    assert result.changed is False and result.undo == ()
+    assert result.error is not None and result.error.startswith("unsupported: ")
+    assert inner.calls == ()
+    dry = _guard(inner, dry_run=True).set_baseline_read_only(True)
+    assert dry.ok is True and "offers no baseline" in dry.detail
+
+
+def test_the_baseline_turns_an_exception_or_rubbish_into_a_failed_result() -> None:
+    raised = _guard(
+        _BaselineEnforcer(_raise(PermissionError("udev is read-only")))
+    ).set_baseline_read_only(True)
+    assert raised.ok is False and raised.mechanism == "error"
+    assert raised.error == "PermissionError: udev is read-only"
+    rubbish = _guard(_BaselineEnforcer(lambda: None)).set_baseline_read_only(False)
+    assert rubbish.ok is False and rubbish.mechanism == "error"
+    assert rubbish.action is Action.READ_WRITE
+
+
+def test_the_baseline_insists_on_a_real_boolean() -> None:
+    guard = _guard(_BaselineEnforcer(lambda: _baseline_result(Action.READ_ONLY)))
+    with pytest.raises(TypeError):
+        guard.set_baseline_read_only(1)  # type: ignore[arg-type]
 
 
 # --- the property: nothing protected or out of scope is ever restricted ----------------

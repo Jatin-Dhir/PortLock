@@ -9,7 +9,9 @@ apart from auditing itself.
   its owner can read, and rotates it by atomic rename.
 * :class:`SyslogSink` sends RFC 5424 messages to a UDP address or a Unix socket.
 * :class:`CallbackSink` hands each record to a function, which is how another component
-  (a ClawNet channel, the console's live view) subscribes.
+  (the console's live view) subscribes.
+* :class:`ClawNetSink` publishes each record, as a signed security event, to a ClawNet
+  node's local API. Off unless configured, and it never waits for the network.
 * :class:`MinSeveritySink` wraps any of them with a severity threshold.
 
 **No sink sends anything anywhere unless it is explicitly configured.** There are no
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import http.client
 import ipaddress
 import json
 import os
@@ -33,14 +36,15 @@ import socket
 import sys
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from portlock.audit.events import AuditError, coerce_severity
+from portlock.audit.events import AuditError, coerce_severity, security_event_from_record
 from portlock.audit.log import AuditRecord
-from portlock.core.canonical import canonicalize
+from portlock.core.canonical import canonical_bytes, canonicalize
 from portlock.core.errors import CanonicalError
 from portlock.core.fsutil import ensure_private_dir, restrict_to_owner
 from portlock.core.models import Severity
@@ -48,6 +52,8 @@ from portlock.core.models import Severity
 __all__ = [
     "AuditSink",
     "CallbackSink",
+    "ClawNetSink",
+    "EventSignerLike",
     "FanOut",
     "JsonlFileSink",
     "MinSeveritySink",
@@ -628,6 +634,274 @@ class CallbackSink:
     def emit(self, record: AuditRecord) -> None:
         """Call the function with ``record``; whatever it raises propagates."""
         self._callback(record)
+
+
+# --- ClawNet ---------------------------------------------------------------------------
+
+_CLAWNET_CHANNEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+# What a bearer token may contain; anything else could not be a header value we made.
+_BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,512}\Z")
+_TOKEN_FILE_LIMIT = 4096
+_CLAWNET_QUEUE = 256
+_CLAWNET_RESPONSE_LIMIT = 4096
+
+
+class EventSignerLike(Protocol):
+    """What :class:`ClawNetSink` needs of a signer (``portlock.audit.signing.EventSigner``)."""
+
+    def sign_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the envelope with its ``sig`` member added."""
+        ...
+
+
+def _loopback_host(host: str) -> bool:
+    """True for ``localhost`` and loopback IP literals. Never resolves a name."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class ClawNetSink:
+    """Publish each signed security event to a ClawNet node's local API.
+
+    Every record becomes the security-event envelope of ``docs/SECURITY_EVENT_FORMAT.md``,
+    signed with ``signer``, and is sent as one ``POST`` of canonical JSON to
+    ``<base_url>/api/v1/channels/<channel>/publish`` with the header
+    ``Authorization: Bearer <token>``. The node answers 2xx when it accepted the event.
+
+    **Off unless configured, and never in the way.**
+
+    * There are no defaults: the base URL, the channel, the token file, the host label and
+      the signer must all be given, and nothing is created or contacted until a record is
+      emitted.
+    * :meth:`emit` only puts the record on a bounded queue and returns; one worker thread
+      does the network I/O with a short timeout. A node that is down, slow or refusing
+      the token costs the audit log nothing: the failure is counted in :meth:`stats` and
+      the record is not retried (the database is the record, and signed checkpoints are
+      the evidence). When the queue is full the newest record is dropped and counted.
+    * Plain ``http`` is accepted only for a loopback address, because the token travels
+      in the clear; ``https`` verifies the node's certificate against the system store.
+      Redirects are not followed.
+    * The token is read from ``token_file`` for every request, so rotating it needs no
+      restart. It is never logged and never appears in an error message or a counter.
+
+    Args:
+        base_url: ``http://127.0.0.1:<port>`` (a path prefix is allowed; query,
+            fragment and credentials are not).
+        channel: the ClawNet channel name (``[a-z0-9][a-z0-9._-]{0,63}``).
+        token_file: a file holding the bearer token (at most 4096 bytes, surrounding
+            whitespace ignored).
+        host: the operator-chosen label for this machine (``source.host``).
+        signer: signs each envelope.
+        timeout: seconds one request may take, connecting included.
+        queue_size: records that may wait for the worker.
+
+    Raises:
+        AuditError: if an argument is invalid or ``http`` is used for a non-loopback host.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        channel: str,
+        token_file: str | os.PathLike[str],
+        *,
+        host: str,
+        signer: EventSignerLike,
+        timeout: float = 2.0,
+        queue_size: int = _CLAWNET_QUEUE,
+    ) -> None:
+        if not callable(getattr(signer, "sign_event", None)):
+            raise AuditError("signer must have a sign_event() method")
+        if not isinstance(host, str) or not host:
+            raise AuditError("host must be the operator's label for this machine")
+        if not isinstance(channel, str) or not _CLAWNET_CHANNEL.match(channel):
+            raise AuditError("a ClawNet channel is 1 to 64 characters of a-z 0-9 . _ -")
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not timeout > 0:
+            raise AuditError("timeout must be a positive number of seconds")
+        if isinstance(queue_size, bool) or not isinstance(queue_size, int) or queue_size < 1:
+            raise AuditError("queue_size must be a positive integer")
+        try:
+            parts = urllib.parse.urlsplit(base_url if isinstance(base_url, str) else "")
+            port = parts.port
+        except ValueError as exc:
+            raise AuditError("base_url is not a valid URL") from exc
+        if (
+            parts.scheme not in ("http", "https")
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+        ):
+            raise AuditError("base_url is http(s)://host[:port][/prefix], with no credentials")
+        if parts.scheme == "http" and not _loopback_host(parts.hostname):
+            raise AuditError("plain http is allowed only to a loopback address; use https")
+        self._tls = parts.scheme == "https"
+        self._host_name = parts.hostname
+        self._port = port if port is not None else (443 if self._tls else 80)
+        self._path = parts.path.rstrip("/") + f"/api/v1/channels/{channel}/publish"
+        self._token_file = Path(token_file)
+        self._label = host
+        self._signer = signer
+        self._timeout = float(timeout)
+        self._lock = threading.Lock()
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
+        self._thread: threading.Thread | None = None
+        self._closed = False
+        self._sent = 0
+        self._failed = 0
+        self._dropped = 0
+        self._last_error: str | None = None
+
+    @property
+    def url(self) -> str:
+        """Where events are published (no credentials; the token is not part of it)."""
+        scheme = "https" if self._tls else "http"
+        host = f"[{self._host_name}]" if ":" in self._host_name else self._host_name
+        return f"{scheme}://{host}:{self._port}{self._path}"
+
+    def stats(self) -> SinkStats:
+        """Delivery counters: ``delivered`` (accepted by the node), ``failed``,
+        ``dropped`` (queue full or sink closed) and ``queued``."""
+        with self._lock:
+            return SinkStats(
+                "clawnet",
+                self._sent,
+                self._failed,
+                self._dropped,
+                self._queue.qsize(),
+                self._last_error,
+            )
+
+    def emit(self, record: AuditRecord) -> None:
+        """Queue ``record`` for publication. Never raises and never waits for the network."""
+        with self._lock:
+            if self._closed:
+                self._dropped += 1
+                return
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run, name="portlock-audit-clawnet", daemon=True
+                )
+                self._thread.start()
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                self._dropped += 1
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Wait until everything queued has been tried. True if the queue emptied in time."""
+        deadline = time.monotonic() + timeout
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        return True
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Stop accepting records, try what is queued and stop the worker. Safe twice."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            thread = self._thread
+        if thread is not None:
+            deadline = time.monotonic() + timeout
+            with contextlib.suppress(queue.Full):
+                self._queue.put(None, timeout=max(0.0, timeout))
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+    # --- the worker ------------------------------------------------------------------
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                self._deliver(item)
+            finally:
+                self._queue.task_done()
+
+    def _deliver(self, record: AuditRecord) -> None:
+        try:
+            self._publish(record)
+        except Exception as exc:
+            # Whatever went wrong is counted and remembered, never raised: nothing here may
+            # reach the audit log. Messages are built from exception types and our own
+            # wording only, so the token cannot leak into them.
+            with self._lock:
+                self._failed += 1
+                self._last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            with self._lock:
+                self._sent += 1
+
+    def _publish(self, record: AuditRecord) -> None:
+        token = self._read_token()
+        event = security_event_from_record(record, host=self._label)
+        body = canonical_bytes(self._signer.sign_event(event))
+        connection: http.client.HTTPConnection
+        if self._tls:
+            connection = http.client.HTTPSConnection(
+                self._host_name, self._port, timeout=self._timeout
+            )
+        else:
+            connection = http.client.HTTPConnection(
+                self._host_name, self._port, timeout=self._timeout
+            )
+        try:
+            connection.request(
+                "POST",
+                self._path,
+                body=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Connection": "close",
+                    "User-Agent": "portlock-audit",
+                },
+            )
+            response = connection.getresponse()
+            response.read(_CLAWNET_RESPONSE_LIMIT)
+            status = response.status
+        except OSError as exc:
+            raise AuditError(
+                f"cannot reach the ClawNet node: {type(exc).__name__}", code="sink_error"
+            ) from None
+        except http.client.HTTPException as exc:
+            raise AuditError(
+                f"the ClawNet node answered badly: {type(exc).__name__}", code="sink_error"
+            ) from None
+        finally:
+            connection.close()
+        if not 200 <= status < 300:
+            raise AuditError(
+                f"the ClawNet node refused the event (HTTP {status})", code="sink_error"
+            )
+
+    def _read_token(self) -> str:
+        try:
+            with open(self._token_file, "rb") as stream:
+                raw = stream.read(_TOKEN_FILE_LIMIT + 1)
+        except OSError as exc:
+            raise AuditError(
+                f"the ClawNet token file cannot be read ({type(exc).__name__})", code="sink_error"
+            ) from None
+        token = ""
+        if len(raw) <= _TOKEN_FILE_LIMIT:
+            token = raw.decode("ascii", errors="replace").strip()
+        if not _BEARER_TOKEN.match(token):
+            raise AuditError(
+                "the ClawNet token file does not hold a usable token", code="sink_error"
+            )
+        return token
 
 
 # --- severity filter -----------------------------------------------------------------

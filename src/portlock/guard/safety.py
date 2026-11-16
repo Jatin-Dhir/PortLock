@@ -86,6 +86,7 @@ __all__ = [
     "MECHANISM_ERROR",
     "MECHANISM_OUT_OF_SCOPE",
     "MECHANISM_REFUSED",
+    "MECHANISM_UNSUPPORTED",
     "FlapVerdict",
     "PortFlapGuard",
     "PortRelease",
@@ -125,6 +126,8 @@ MECHANISM_OUT_OF_SCOPE = "out-of-scope"
 MECHANISM_DRY_RUN = "dry-run"
 #: ``EnforcementResult.mechanism`` when the wrapped enforcer broke its no-raise contract.
 MECHANISM_ERROR = "error"
+#: ``EnforcementResult.mechanism`` when the wrapped enforcer has no such mechanism at all.
+MECHANISM_UNSUPPORTED = "unsupported"
 
 _LOG = logging.getLogger(__name__)
 _UNKNOWN_CATEGORIES = frozenset({DeviceCategory.OTHER, DeviceCategory.VENDOR})
@@ -539,6 +542,39 @@ class SafeEnforcer(Enforcer):
             f"turn default-deny {'on' if enabled else 'off'}",
             lambda: self._inner.set_default_deny(enabled),
         )
+
+    def set_baseline_read_only(self, enabled: bool) -> EnforcementResult:
+        """Turn the standing read-only baseline (DESIGN 14.14) on or off.
+
+        Handled like :meth:`set_default_deny`: it is not about one device, so there is no
+        protection check, and in dry-run mode nothing reaches the wrapped enforcer. The
+        baseline is not part of the :class:`Enforcer` interface because only some
+        enforcers can offer it. When the wrapped one cannot, the result is
+        ``ok=False`` with ``mechanism="unsupported"``, so the caller records the
+        baseline as not in place instead of assuming it is.
+        """
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be True or False")
+        action = Action.READ_ONLY if enabled else Action.READ_WRITE
+        setter = getattr(self._inner, "set_baseline_read_only", None)
+        what = f"turn the read-only baseline {'on' if enabled else 'off'}"
+        if self._dry_run:
+            note = "" if callable(setter) else " (this enforcer offers no baseline)"
+            return EnforcementResult(
+                action=action,
+                ok=True,
+                mechanism=MECHANISM_DRY_RUN,
+                detail=f"dry-run: {what} was not attempted{note}",
+            )
+        if not callable(setter):
+            return EnforcementResult(
+                action=action,
+                ok=False,
+                mechanism=MECHANISM_UNSUPPORTED,
+                detail=f"not enforced: {what}: this enforcer offers no baseline",
+                error="unsupported: this enforcer has no standing read-only baseline",
+            )
+        return self._call(action, lambda: setter(enabled))
 
     def restore(self, entries: Sequence[JournalEntry]) -> EnforcementResult:
         """Put journaled settings back. Never refused."""

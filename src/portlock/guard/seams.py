@@ -1097,8 +1097,14 @@ class SystemdRunTimer:
 
     @staticmethod
     def unit(name: str) -> str:
-        """The unit name stem for timer ``name``."""
-        return f"portlock-{validate_timer_name(name)}"
+        """The unit name stem for timer ``name``.
+
+        PortLock's own timers are already named ``portlock-lockdown`` and
+        ``portlock-confirm-<id>``; they are not prefixed a second time, so no unit is
+        ever called ``portlock-portlock-...``. Any other name gets the prefix.
+        """
+        valid = validate_timer_name(name)
+        return valid if valid.startswith("portlock-") else f"portlock-{valid}"
 
     def arm(self, name: str, at: datetime, argv: Sequence[str]) -> None:
         unit = self.unit(name)

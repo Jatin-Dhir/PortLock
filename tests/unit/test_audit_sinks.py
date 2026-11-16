@@ -8,6 +8,7 @@ import socket
 import stat
 import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,10 @@ from portlock.audit.events import AuditError
 from portlock.audit.log import AuditKeyStore, AuditLog, AuditRecord
 from portlock.audit.sinks import (
     CallbackSink,
+    ClawNetSink,
     FanOut,
     JsonlFileSink,
+    MinSeveritySink,
     SinkStats,
     SyslogSink,
     format_rfc5424,
@@ -933,3 +936,357 @@ def test_background_delivery_from_concurrent_appenders_keeps_sequence_order(
     assert fan.close(WAIT) is True
     assert [record.seq for record in sink.records] == list(range(1, workers * each + 1))
     assert fan.dropped == 0 and fan.failures == 0
+
+
+# --- ClawNet ---------------------------------------------------------------------------
+
+TOKEN = "tkn-0123456789abcdef"
+LABEL = "lab-host"
+
+
+class StubSigner:
+    """Marks an envelope as signed without needing the optional ``cryptography`` package."""
+
+    def sign_event(self, event: Any) -> dict[str, Any]:
+        signed = dict(event)
+        signed["sig"] = {"alg": "stub", "key": "k", "value": "v"}
+        return signed
+
+
+class RaisingSigner:
+    def sign_event(self, event: Any) -> dict[str, Any]:
+        raise RuntimeError("the signing key is gone")
+
+
+class Node:
+    """A ClawNet node's local API on 127.0.0.1 with an ephemeral port, as far as the sink
+    can tell: it records what it was sent and answers as it is told to."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.status = 202
+        self.gate: threading.Event | None = None
+        self.arrived = threading.Event()
+        node = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                node.requests.append(
+                    {"path": self.path, "headers": dict(self.headers.items()), "body": body}
+                )
+                node.arrived.set()
+                if node.gate is not None:
+                    node.gate.wait(WAIT)
+                self.send_response(node.status)
+                self.send_header("Content-Length", "0")
+                if node.status in (301, 302):
+                    self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+                self.end_headers()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def stop(self) -> None:
+        if self.gate is not None:
+            self.gate.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(WAIT)
+
+
+@pytest.fixture
+def node() -> Iterator[Node]:
+    running = Node()
+    try:
+        yield running
+    finally:
+        running.stop()
+
+
+@pytest.fixture
+def token_file(tmp_path: Path) -> Path:
+    path = tmp_path / "clawnet.token"
+    path.write_text(TOKEN + "\n", encoding="ascii")
+    return path
+
+
+def clawnet(node: Node, token_file: Path, **options: Any) -> ClawNetSink:
+    arguments: dict[str, Any] = {"host": LABEL, "signer": StubSigner(), "timeout": 5.0}
+    arguments.update(options)
+    return ClawNetSink(node.base_url, "ops.audit", token_file, **arguments)
+
+
+def test_clawnet_publishes_each_record_as_a_signed_event(node: Node, token_file: Path) -> None:
+    sink = clawnet(node, token_file)
+    try:
+        record = make_record(7, event_type="device.denied", severity=Severity.WARNING)
+        sink.emit(record)
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    assert len(node.requests) == 1
+    request = node.requests[0]
+    assert request["path"] == "/api/v1/channels/ops.audit/publish"
+    headers = {name.lower(): value for name, value in request["headers"].items()}
+    assert headers["authorization"] == f"Bearer {TOKEN}"
+    assert headers["content-type"] == "application/json"
+    event = parse_canonical(request["body"])
+    assert event["type"] == "device.denied" and event["severity"] == "warning"
+    assert event["source"]["host"] == LABEL and event["source"]["product"] == "portlock"
+    assert event["chain"] == {"seq": 7, "hash": record.hash}
+    assert event["subject"] == {"device_fp": FP}
+    assert event["sig"] == {"alg": "stub", "key": "k", "value": "v"}
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed, stats.dropped, stats.queued) == (1, 0, 0, 0)
+    assert stats.last_error is None
+    assert sink.url == f"{node.base_url}/api/v1/channels/ops.audit/publish"
+
+
+def test_clawnet_events_verify_under_the_real_signer(node: Node, token_file: Path) -> None:
+    from portlock.audit import signing
+
+    if not signing.has_signing_support():
+        pytest.skip("the optional cryptography package is not usable here")
+    signer = signing.EventSigner.generate()
+    sink = clawnet(node, token_file, signer=signer)
+    try:
+        sink.emit(make_record(3))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    posted = parse_canonical(node.requests[0]["body"])
+    outcome = signing.verify_event(posted, trusted_keys=[signer.public_key])
+    assert outcome.ok, outcome.reason
+
+
+def test_clawnet_does_nothing_until_it_is_used(node: Node, token_file: Path) -> None:
+    before = {thread.name for thread in threading.enumerate()}
+    sink = clawnet(node, token_file)
+    assert {thread.name for thread in threading.enumerate()} == before
+    assert node.requests == []
+    stats = sink.stats()
+    assert (stats.name, stats.delivered, stats.failed, stats.dropped) == ("clawnet", 0, 0, 0)
+    sink.close(WAIT)  # closing a sink that never ran is fine
+    sink.close(WAIT)
+
+
+def test_clawnet_reads_the_token_again_for_every_request(node: Node, token_file: Path) -> None:
+    sink = clawnet(node, token_file)
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+        token_file.write_text("  rotated-token-2 \r\n", encoding="ascii")
+        sink.emit(make_record(2))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    sent = [request["headers"]["Authorization"] for request in node.requests]
+    assert sent == [f"Bearer {TOKEN}", "Bearer rotated-token-2"]
+
+
+@pytest.mark.parametrize("status", [301, 302, 401, 403, 429, 500])
+def test_clawnet_counts_a_refusal_and_never_leaks_the_token(
+    node: Node, token_file: Path, status: int
+) -> None:
+    node.status = status
+    sink = clawnet(node, token_file)
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed) == (0, 1)
+    assert stats.last_error == f"AuditError: the ClawNet node refused the event (HTTP {status})"
+    assert TOKEN not in (stats.last_error or "")
+    assert len(node.requests) == 1  # a refused record is not retried, a redirect not followed
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, b"", b"   \n", b"two words", b"caf\xc3\xa9", b"x" * 5000, b"bad\x00token"],
+    ids=["missing", "empty", "blank", "space", "non-ascii", "too-long", "nul"],
+)
+def test_clawnet_sends_nothing_without_a_usable_token(
+    node: Node, token_file: Path, content: bytes | None
+) -> None:
+    if content is None:
+        token_file.unlink()
+    else:
+        token_file.write_bytes(content)
+    sink = clawnet(node, token_file)
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed) == (0, 1)
+    assert "token file" in (stats.last_error or "")
+    assert node.requests == []
+    assert str(token_file) not in (stats.last_error or "")
+
+
+def test_clawnet_survives_a_node_that_is_down(node: Node, token_file: Path) -> None:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # nothing listens here now
+    sink = ClawNetSink(
+        f"http://127.0.0.1:{port}", "ops", token_file, host=LABEL, signer=StubSigner(), timeout=5.0
+    )
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed) == (0, 1)
+    assert (stats.last_error or "").startswith("AuditError: cannot reach the ClawNet node")
+    assert TOKEN not in (stats.last_error or "")
+
+
+def test_clawnet_survives_a_broken_signer(node: Node, token_file: Path) -> None:
+    sink = clawnet(node, token_file, signer=RaisingSigner())
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    assert sink.stats().failed == 1 and "RuntimeError" in (sink.stats().last_error or "")
+    assert node.requests == []
+
+
+def test_clawnet_gives_up_on_a_node_that_does_not_answer(node: Node, token_file: Path) -> None:
+    node.gate = threading.Event()
+    sink = clawnet(node, token_file, timeout=0.3)
+    try:
+        sink.emit(make_record(1))
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed) == (0, 1)
+    assert "cannot reach the ClawNet node: TimeoutError" in (stats.last_error or "")
+
+
+def test_clawnet_emit_never_waits_for_the_node(node: Node, token_file: Path) -> None:
+    node.gate = threading.Event()
+    sink = clawnet(node, token_file, queue_size=2)
+    try:
+        sink.emit(make_record(1))
+        assert node.arrived.wait(WAIT)  # the worker is now stuck inside the request
+        sink.emit(make_record(2))
+        sink.emit(make_record(3))
+        sink.emit(make_record(4))  # the queue is full: dropped, counted, not waited for
+        mid = sink.stats()
+        assert (mid.queued, mid.dropped, mid.delivered) == (2, 1, 0)
+        node.gate.set()
+        assert sink.flush(WAIT)
+    finally:
+        sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.failed, stats.dropped, stats.queued) == (3, 0, 1, 0)
+    sent = [parse_canonical(request["body"])["chain"]["seq"] for request in node.requests]
+    assert sent == [1, 2, 3]
+
+
+def test_clawnet_close_delivers_what_is_queued_and_then_drops(node: Node, token_file: Path) -> None:
+    sink = clawnet(node, token_file)
+    for seq in (1, 2, 3):
+        sink.emit(make_record(seq))
+    sink.close(WAIT)
+    assert sink.stats().delivered == 3
+    sink.emit(make_record(4))  # after close: counted, never sent
+    sink.close(WAIT)
+    stats = sink.stats()
+    assert (stats.delivered, stats.dropped) == (3, 1)
+    assert len(node.requests) == 3
+
+
+def test_clawnet_works_behind_the_audit_log_and_a_severity_filter(
+    node: Node, token_file: Path, db: Database, clock: FakeClock
+) -> None:
+    sink = clawnet(node, token_file)
+    fan = FanOut({"clawnet": MinSeveritySink(sink, "warning")}, background=True)
+    log = AuditLog(db, clock=clock, sink=fan)
+    log.append("service.started", actor="system")  # info: filtered out
+    warning = log.append("auth.failure", actor="alice", device_fp=FP)
+    assert fan.close(WAIT) is True
+    assert sink.stats().delivered == 1
+    posted = parse_canonical(node.requests[0]["body"])
+    assert posted["chain"] == {"seq": warning.seq, "hash": warning.hash}
+    assert log.sink_failures == 0
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"base_url": "http://192.0.2.10:47600"},
+        {"base_url": "http://node.example:47600"},
+        {"base_url": "ftp://127.0.0.1:47600"},
+        {"base_url": "127.0.0.1:47600"},
+        {"base_url": ""},
+        {"base_url": None},
+        {"base_url": "http://user:pw@127.0.0.1:47600"},
+        {"base_url": "http://127.0.0.1:47600?x=1"},
+        {"base_url": "http://127.0.0.1:47600#frag"},
+        {"base_url": "http://127.0.0.1:99999"},
+        {"channel": "Ops"},
+        {"channel": "ops/../admin"},
+        {"channel": ""},
+        {"channel": "a" * 65},
+        {"channel": None},
+        {"host": ""},
+        {"host": None},
+        {"signer": object()},
+        {"timeout": 0},
+        {"timeout": -1},
+        {"timeout": True},
+        {"timeout": "2"},
+        {"queue_size": 0},
+        {"queue_size": True},
+    ],
+)
+def test_clawnet_refuses_invalid_configuration(token_file: Path, arguments: dict[str, Any]) -> None:
+    options: dict[str, Any] = {
+        "base_url": "http://127.0.0.1:47600",
+        "channel": "ops",
+        "host": LABEL,
+        "signer": StubSigner(),
+    }
+    options.update(arguments)
+    base_url = options.pop("base_url")
+    channel = options.pop("channel")
+    with pytest.raises(AuditError):
+        ClawNetSink(base_url, channel, token_file, **options)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:47600", "http://127.0.0.1:47600/api/v1/channels/ops/publish"),
+        ("http://127.0.0.1:47600/", "http://127.0.0.1:47600/api/v1/channels/ops/publish"),
+        ("http://localhost", "http://localhost:80/api/v1/channels/ops/publish"),
+        ("http://[::1]:8080/node", "http://[::1]:8080/node/api/v1/channels/ops/publish"),
+        ("https://node.example", "https://node.example:443/api/v1/channels/ops/publish"),
+        ("https://node.example:8443/x/", "https://node.example:8443/x/api/v1/channels/ops/publish"),
+    ],
+)
+def test_clawnet_builds_the_publish_url(token_file: Path, base_url: str, expected: str) -> None:
+    sink = ClawNetSink(base_url, "ops", token_file, host=LABEL, signer=StubSigner())
+    assert sink.url == expected
+    sink.close()

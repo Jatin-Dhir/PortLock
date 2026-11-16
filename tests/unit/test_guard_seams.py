@@ -430,6 +430,66 @@ WIN_RECOVER = (
 )
 
 
+LOCKDOWN_TIMER = "portlock-lockdown"
+CONFIRM_TIMER = "portlock-confirm-" + "0123456789abcdef"
+
+
+@pytest.mark.parametrize("name", [LOCKDOWN_TIMER, CONFIRM_TIMER])
+def test_the_names_the_lockdown_manager_uses_are_valid_timer_names(name: str) -> None:
+    assert validate_timer_name(name) == name
+    assert len(name) <= 48
+    for bad in (name.upper(), name + " ", name + ";x", "-" + name, name + chr(10)):
+        with pytest.raises(ValueError):
+            validate_timer_name(bad)
+
+
+@pytest.mark.parametrize("name", [LOCKDOWN_TIMER, CONFIRM_TIMER])
+def test_the_fake_timer_replaces_a_timer_of_the_same_name(name: str) -> None:
+    timer = FakeExternalTimer()
+    later = AT + timedelta(minutes=30)
+    timer.arm(name, AT, RECOVER)
+    timer.arm(name, later, (*RECOVER, "--again"))
+    assert list(timer.armed) == [name]
+    assert timer.armed[name] == (later.replace(microsecond=0), (*RECOVER, "--again"))
+    timer.arm(CONFIRM_TIMER if name == LOCKDOWN_TIMER else LOCKDOWN_TIMER, AT, RECOVER)
+    assert len(timer.armed) == 2
+    timer.cancel(name)
+    assert name not in timer.armed and len(timer.armed) == 1
+
+
+@pytest.mark.parametrize("name", [LOCKDOWN_TIMER, CONFIRM_TIMER])
+def test_systemd_timers_for_portlock_names_are_not_prefixed_twice(name: str) -> None:
+    runner = FakeCommandRunner()
+    timer = SystemdRunTimer(runner)
+    assert timer.unit(name) == name
+    assert timer.unit("deadman") == "portlock-deadman"
+    # Arming a timer that already exists stops it first, which replaces it.
+    timer.arm(name, AT, RECOVER)
+    timer.arm(name, AT + timedelta(minutes=5), RECOVER)
+    commands = runner.commands()
+    assert [command[:3] for command in commands if command[1] == "stop"] == [
+        ("/usr/bin/systemctl", "stop", f"{name}.timer")
+    ] * 2
+    units = [command[1] for command in commands if command[0].endswith("systemd-run")]
+    assert units == [f"--unit={name}"] * 2
+    assert all("portlock-portlock" not in " ".join(command) for command in commands)
+
+
+@pytest.mark.parametrize("name", [LOCKDOWN_TIMER, CONFIRM_TIMER])
+def test_scheduled_task_timers_accept_the_lockdown_names(name: str, tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    timer = ScheduledTaskTimer(runner, tmp_path, schtasks="s.exe")
+    full_name = "\\PortLock\\" + name
+    assert timer.task_name(name) == full_name
+    timer.arm(name, AT, WIN_RECOVER)
+    timer.arm(name, AT + timedelta(minutes=5), WIN_RECOVER)
+    creates = [command for command in runner.commands() if "/Create" in command]
+    # /F overwrites a task of the same name: the second arming replaces the first.
+    assert len(creates) == 2
+    assert all("/F" in command and command[3] == full_name for command in creates)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_the_task_definition_runs_as_system_at_the_time_in_utc() -> None:
     xml = scheduled_task_xml(
         AT.astimezone(timezone(timedelta(hours=-5))), WIN_RECOVER, description="a & b <c>"
