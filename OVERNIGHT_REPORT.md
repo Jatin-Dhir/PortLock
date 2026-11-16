@@ -140,7 +140,7 @@ the full suite on Linux and Windows across Python 3.11 to 3.14, and the read-onl
 tests on a Linux and a Windows runner: eleven jobs, all green. For the commit before it
 the Linux live-test job had failed: the test's flight recorder wrote its first report
 after one second, and a fast runner had answered and been killed by then (a fault of
-the test, fixed in `36012b4`). The fourth pass was pushed after that run.
+the test, fixed in `36012b4`). The fourth pass (`c7484fb`) then passed the same eleven jobs.
 
 ## 7. Build and runtime verification
 
@@ -176,7 +176,7 @@ the test, fixed in `36012b4`). The fourth pass was pushed after that run.
 
 ## 8. Git commits created
 
-26 commits in all, from `35777d0` (retire the prototype) to the fourth watch-only pass,
+27 commits in all, from `35777d0` (retire the prototype) to the fourth watch-only pass,
 including the commits that add and correct this report. `git log main..claude/overnight-security-framework`
 lists them; each is one logical unit.
 
