@@ -6,9 +6,17 @@ import contextlib
 import os
 import sys
 import tempfile
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
-__all__ = ["atomic_write_bytes", "atomic_write_text", "ensure_private_dir", "restrict_to_owner"]
+__all__ = [
+    "atomic_write_bytes",
+    "atomic_write_text",
+    "ensure_private_dir",
+    "exclusive_lock",
+    "restrict_to_owner",
+]
 
 
 def ensure_private_dir(path: str | os.PathLike[str]) -> Path:
@@ -85,3 +93,50 @@ def _sync_directory(directory: Path) -> None:
         pass
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def exclusive_lock(path: str | os.PathLike[str], *, timeout: float = 10.0) -> Iterator[None]:
+    """Hold an exclusive lock on ``path`` against every other process and handle.
+
+    For a short read-compare-write on a small state file that several writers share. A
+    lock inside one object does not help when two processes, or two objects in one
+    process, write the same file. The lock file is created if missing and left in place.
+
+    This waits on the real clock, not an injected one: it guards real file access.
+
+    Raises:
+        OSError: if the lock cannot be taken within ``timeout`` seconds (Windows), or the
+            lock file cannot be opened.
+    """
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            deadline = time.monotonic() + timeout
+            while True:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                try:
+                    # Non-blocking: the blocking form retries only once a second.
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.001)
+            try:
+                yield
+            finally:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)

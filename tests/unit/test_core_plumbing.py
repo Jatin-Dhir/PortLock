@@ -606,3 +606,23 @@ def test_private_files_and_dirs_are_owner_only(tmp_path: Path) -> None:
     target = directory / "secret"
     atomic_write_text(target, "x")
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_exclusive_lock_makes_read_compare_write_atomic_across_handles(tmp_path: Path) -> None:
+    from portlock.core.fsutil import exclusive_lock
+
+    counter, lock_file = tmp_path / "counter", tmp_path / "counter.lock"
+    counter.write_text("0")
+
+    def bump() -> None:
+        for _ in range(50):
+            # Each call opens its own descriptor, as two processes would.
+            with exclusive_lock(lock_file):
+                counter.write_text(str(int(counter.read_text()) + 1))
+
+    threads = [threading.Thread(target=bump) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert counter.read_text() == "200"

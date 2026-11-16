@@ -145,7 +145,7 @@ from portlock.core.canonical import canonical_bytes, canonicalize, parse_canonic
 from portlock.core.clock import Clock, parse_utc_iso, utc_iso
 from portlock.core.db import Database
 from portlock.core.errors import CanonicalError, StoreError
-from portlock.core.fsutil import atomic_write_bytes, ensure_private_dir
+from portlock.core.fsutil import atomic_write_bytes, ensure_private_dir, exclusive_lock
 from portlock.core.models import Severity
 
 if TYPE_CHECKING:
@@ -1032,7 +1032,19 @@ class AuditLog:
         """
         if self._key_store is None and self._head_path is None:
             return
-        with self._state_lock:
+        with self._state_lock, contextlib.ExitStack() as guard:
+            if self._head_path is not None:
+                # The lock above is per AuditLog. Two logs on one database (the service
+                # and the command line, say) each compare and then write, so the one that
+                # appended the older record could write last and leave the files a record
+                # behind. A lock shared through the filesystem makes compare-and-write
+                # atomic for all of them. If it cannot be taken the write still happens:
+                # a state file that is briefly stale is better than none.
+                lock_path = self._head_path.with_name(self._head_path.name + ".lock")
+                try:
+                    guard.enter_context(exclusive_lock(lock_path))
+                except OSError:
+                    self._state_failures += 1
             if self._key_store is not None and mac_key is not None:
                 try:
                     self._key_store.advance_past(seq, mac_key)
