@@ -83,6 +83,10 @@ class Database:
         self._read_only = read_only
         self._lock = threading.RLock()
         self._depth = 0
+        # The thread inside the outermost transaction() block, if any. Only that thread
+        # can be inside it (the block holds the lock), so in_transaction compares against
+        # it rather than reading _depth, which another thread's transaction also raises.
+        self._transaction_thread: int | None = None
         try:
             if self._path is None:
                 self._conn = sqlite3.connect(
@@ -152,6 +156,17 @@ class Database:
         otherwise what SQLite kept (typically ``delete``)."""
         return self._journal_mode
 
+    @property
+    def in_transaction(self) -> bool:
+        """True while the *calling thread* is inside a :meth:`transaction` block.
+
+        For code that must never run inside one: an enforcement call or an
+        operating-system timer can take seconds, and holding the database's write lock
+        for that long stalls every other writer (``docs/ARCHITECTURE.md`` section 1.4).
+        Another thread's open transaction does not count.
+        """
+        return self._transaction_thread == threading.get_ident()
+
     def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> ExecuteResult:
         """Run one statement to completion. Outside :meth:`transaction` it commits
         immediately.
@@ -214,19 +229,25 @@ class Database:
             except sqlite3.Error as exc:
                 raise StoreError(f"cannot begin transaction: {exc}") from exc
             self._depth += 1
+            if outermost:
+                self._transaction_thread = threading.get_ident()
             try:
-                yield self
-            except BaseException:
-                self._depth -= 1
-                self._roll_back(outermost, savepoint)
-                raise
-            self._depth -= 1
-            try:
-                self._conn.execute("COMMIT" if outermost else f"RELEASE SAVEPOINT {savepoint}")
-            except sqlite3.Error as exc:
-                if outermost:
+                try:
+                    yield self
+                except BaseException:
+                    self._depth -= 1
                     self._roll_back(outermost, savepoint)
-                raise StoreError(f"cannot commit transaction: {exc}") from exc
+                    raise
+                self._depth -= 1
+                try:
+                    self._conn.execute("COMMIT" if outermost else f"RELEASE SAVEPOINT {savepoint}")
+                except sqlite3.Error as exc:
+                    if outermost:
+                        self._roll_back(outermost, savepoint)
+                    raise StoreError(f"cannot commit transaction: {exc}") from exc
+            finally:
+                if outermost:
+                    self._transaction_thread = None
 
     def _roll_back(self, outermost: bool, savepoint: str) -> None:
         if not self._conn.in_transaction:

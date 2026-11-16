@@ -177,6 +177,44 @@ def test_nested_transaction_rolls_back_only_its_own_work(db: Database) -> None:
     ]
 
 
+def test_in_transaction_is_true_only_inside_a_block_on_the_calling_thread(db: Database) -> None:
+    db.migrate("notes", MIGRATIONS)
+    assert db.in_transaction is False
+    with db.transaction():
+        assert db.in_transaction is True
+        with db.transaction():
+            assert db.in_transaction is True
+        # Leaving a nested block does not end the outer one.
+        assert db.in_transaction is True
+    assert db.in_transaction is False
+
+    with pytest.raises(RuntimeError), db.transaction():
+        assert db.in_transaction is True
+        raise RuntimeError("boom")
+    assert db.in_transaction is False
+
+    # Another thread's open transaction is not the caller's.
+    inside, release = threading.Event(), threading.Event()
+    seen: list[bool] = []
+
+    def hold() -> None:
+        with db.transaction():
+            seen.append(db.in_transaction)
+            inside.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    try:
+        assert inside.wait(5)
+        assert db.in_transaction is False
+    finally:
+        release.set()
+        worker.join(5)
+    assert seen == [True]
+    assert db.in_transaction is False
+
+
 def test_concurrent_writers_do_not_lose_updates(db: Database) -> None:
     db.execute("CREATE TABLE counter (n INTEGER NOT NULL)")
     db.execute("INSERT INTO counter VALUES (0)")
