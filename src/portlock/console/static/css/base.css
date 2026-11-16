@@ -179,7 +179,14 @@ code,
   line-height: 1.45;
 }
 
+/* The label and the sentence flow as one paragraph, so at phone width they share lines. */
+.wobar > p {
+  margin: 0;
+  max-width: 90ch;
+}
+
 .wobar strong {
+  margin-right: var(--s2);
   color: var(--watch);
   font-size: var(--fs-xs);
   font-weight: 700;
@@ -187,12 +194,26 @@ code,
   text-transform: uppercase;
 }
 
-.wobar span {
-  max-width: 90ch;
-}
-
+/* "Why": a native disclosure. Open, it takes the whole width so the reason reads as a line. */
 .wobar .why {
   color: var(--text-2);
+}
+
+.wobar .why[open] {
+  flex-basis: 100%;
+}
+
+/* Padding with an equal negative margin: a 24 px target without moving the text. */
+.wobar .why summary {
+  padding: var(--s1) var(--s2);
+  margin: calc(-1 * var(--s1)) calc(-1 * var(--s2));
+  color: var(--watch);
+  font-weight: 600;
+}
+
+.wobar .why p {
+  max-width: 90ch;
+  margin: var(--s1) 0 0;
 }
 
 .topbar {

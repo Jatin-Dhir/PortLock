@@ -123,11 +123,27 @@ registry value and changes no permission outside its own folder.
 
 **Who is watch-only, and why.** Whether a PortLock process is watch-only is decided once,
 when it starts, and never changes while it runs. It is watch-only when it is **not**
-running as administrator (root on Linux), **or** when its files are in your own user
-folders. Every program you run can change files in your own folders, so nothing PortLock
-keeps there (its policy, its record of what it changed) could be trusted to control the
-computer. Such a process never even builds the parts that could change the computer, and
-there is no button, command or setting that turns them on while it runs.
+running as administrator (root on Linux), **or** when its files are in a user's own
+folders: yours, another account's, or the folder all users share. Every program a user
+runs can change files in that user's folders, so nothing PortLock keeps there (its policy,
+its record of what it changed) could be trusted to control the computer. Such a process
+never even builds the parts that could change the computer, and there is no button,
+command or setting that turns them on while it runs. The reason it gives names the case at
+hand, for example "its files are in another user's folders".
+
+Three cases that come up in practice:
+
+- **Another account's folder counts too.** An administrator window opened with another
+  person's credentials, or `sudo PORTLOCK_HOME=/home/alice/pl portlock run`, is watch-only:
+  on Windows every profile under the profiles folder and the shared `PUBLIC` folder count
+  as per-user; on Linux everything under `/home` and `/Users`, and the home of the account
+  that ran `sudo`, `doas` or `pkexec`.
+- **A root installation must not live in root's own home** (`/root`): PortLock refuses to
+  enforce from there and says so.
+- **A redirected AppData does not get in the way.** On a PC whose AppData is redirected to
+  a file server (Folder Redirection), an administrator's system-wide installation is not
+  made watch-only by it.
+
 
 A watch-only PortLock **refuses**, with that reason, three things: switching to enforce
 mode, engaging an emergency lockdown and turning on default-deny. Turning default-deny
@@ -165,8 +181,13 @@ PortLock is running in WATCH-ONLY mode: it shows and records your USB devices an
 ```
 
 Open that address and sign in with the name and password from `init`. Once you are
-signed in, every page of the console starts with a "Watch-only" bar saying the same thing
-and why.
+signed in, every page of the console starts with a "Watch-only" bar saying the same thing;
+open its "Why" to read the reason.
+
+**Run `init` before `run`, not beside it.** `init` refuses, before it creates anything,
+while a PortLock service is running on the same folder, and says to stop that service
+first. If you started `run` before any administrator existed, it tells you what to do:
+stop it (Ctrl+C), run `init`, then start it again.
 
 **To stop PortLock**, press Ctrl+C in that window, or run `python -m portlock stop` in
 another ordinary PowerShell window opened in the same `src` folder. Closing the window is
@@ -256,12 +277,12 @@ python -m pytest
 ## The safe default, and enforce mode
 
 A fresh install runs in `monitor` mode. It decides, records "would block" or "would make
-read-only" in the audit log, and changes nothing. Look at `portlock devices` and
+read-only" in the audit log, and changes no device. Look at `portlock devices` and
 `portlock audit tail` for a while before enforcing anything.
 
 Monitor mode and watch-only are not the same thing:
 
-- **A watch-only process** (not administrator, or its files in a user's own folders) never
+- **A watch-only process** (not administrator, or its files in a user's folders) never
   builds the enforcer, the dead-man timer or the directory-permission tool, so it cannot
   change the machine by mistake. It refuses enforce mode, a lockdown and turning on
   default-deny, says why, and stays watch-only until it stops.

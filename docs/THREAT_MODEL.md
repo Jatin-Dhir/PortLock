@@ -126,19 +126,32 @@ that cannot be undone.
 ### 3.5 A watch-only PortLock (a user's own, or any process that is not trusted to enforce)
 
 A PortLock process is **watch-only** when it is not elevated (administrator, root), or when
-its state or configuration directory is inside a user's own profile. It is decided once, at
+its state or configuration directory is in a user's folders. It is decided once, at
 start; the mode does not decide it, and nothing inside the process can change it. The
 reason is the adversary of 3.3: every program a user runs can write that user's own
 folders, so a policy, a configuration or an enforcement journal kept there could be written
 by malware, and must never drive the real enforcer, not even from an elevated process.
-Another spelling of the profile (a short name, a `\\?\` or UNC path, `..`, a junction, a
-symbolic link, a `subst` drive) is resolved before the comparison, and anything that cannot
-be resolved counts as per-user (fail closed).
+
+"A user's folders" means any user's, not only the account that runs PortLock: an elevated
+process started with another administrator's credentials, or through `sudo` with a
+`PORTLOCK_HOME` in someone else's home, would otherwise enforce from a folder that other
+user can forge. So every profile under the Windows profiles folder and the shared `PUBLIC`
+folder count, and on Linux everything under `/home` and `/Users` and the home of the
+account behind `sudo`, `doas` or `pkexec`; if that account's home cannot be found, the
+location counts as not system-wide. Root's own home (`/root`) is refused too. Another
+spelling of the profile (a short name, a `\\?\` path, `..`, a junction, a symbolic link, a
+`subst` drive) is resolved before the comparison, and anything that cannot be resolved
+counts as not system-wide (fail closed). One exception keeps administrators working on
+managed PCs: a profile variable that points to a share on another computer (AppData
+redirected to a file server) is skipped, because no local directory can lie inside it. A
+UNC path to this computer, a UNC `USERPROFILE` or `LOCALAPPDATA`, and a state or
+configuration directory that is itself a UNC or device path still fail closed.
 
 What a watch-only process can do to the machine: nothing outside its own folder. It never
 builds the enforcer, the dead-man timer or the directory-permission tool; inert stand-ins
 take their place. It runs no program (no `icacls`, no `schtasks`, no antivirus scanner),
-writes no registry value, creates no timer or task, changes no permission and calls no
+writes no registry value, creates no timer or task, changes no permission outside its own
+folder and calls no
 device disable, enable or eject function. Its scans read the files of a drive someone
 approved or asked to scan, with PortLock's own heuristics and hash lists only. It refuses
 enforce mode, a lockdown and turning default-deny on, so a lockdown can never be reported
@@ -158,9 +171,16 @@ What it means for the adversaries above:
   writes anything, so an elevated `recover` cannot be tricked into applying a forged
   journal with the real enforcer.
 - **It cannot hide or undo an enforcing PortLock's changes.** If it finds open journal
-  records or a lockdown that is not idle in the directories it would use, it refuses to
-  start and says to start PortLock, or run `portlock recover`, as administrator. It never
-  closes a journal record on a result that changed nothing.
+  records, a lockdown that is not idle, a journal line it cannot read or a journal it
+  cannot open in the directories it would use, it refuses to start, leaving the journal
+  untouched. For system-wide directories it says to start PortLock, or run
+  `portlock recover`, as administrator; for per-user ones, which `recover` refuses, it
+  says to move the folder aside and have an administrator check the computer. It never
+  closes a journal record on a result that changed nothing, and never compacts or
+  rewrites the journal.
+- **`init` beside a running service.** `init` refuses while a service holds the state
+  directory, so a new audit key is never created under a service that would then write
+  records without a MAC that no key can verify.
 
 An administrator's system-wide PortLock is never watch-only. In monitor mode it builds the
 real mechanisms at start, makes its directories private, honours the kill switch, restores

@@ -2,10 +2,10 @@
 // came from a device goes through h() as a text node.
 
 import { api, seg } from "./api.js";
-import { frag, h } from "./dom.js";
+import { frag, h, replace } from "./dom.js";
 import { bytes, hex, liveAgo, timeEl, vidPid } from "./fmt.js";
 import { state, can } from "./store.js";
-import { decisionLine, enforcementTruth, intendedNote, isWatchOnly, provisionalNote, SOURCE_TEXT } from "./truth.js";
+import { decisionLine, enforcementTruth, intendedNote, intendedOnly, isWatchOnly, provisionalNote, SOURCE_TEXT } from "./truth.js";
 import {
   accessChip,
   button,
@@ -36,6 +36,18 @@ export function confidenceChip(conn) {
     : null;
 }
 
+/**
+ * The State and Decision chips of one connection. Both are dashed when its enforcement is
+ * only intended, so a solid "Denied" always means the operating system was asked to do it.
+ */
+export function truthChips(conn) {
+  const dashed = intendedOnly(conn, state.status);
+  return {
+    state: stateChip(conn.state, { dashed }),
+    decision: conn.decision ? accessChip(conn.decision.access, { dashed }) : null,
+  };
+}
+
 /** Connected devices, one row each. `onOpen(conn)` opens the detail. */
 export function deviceTable(conns, { onOpen, caption = "Connected devices" }) {
   if (conns.length === 0) return null;
@@ -57,7 +69,7 @@ export function deviceTable(conns, { onOpen, caption = "Connected devices" }) {
         label: "State",
         cell: (conn) =>
           frag(
-            stateChip(conn.state),
+            truthChips(conn).state,
             conn.provisional ? h("div", { class: "cell-sub" }, provisionalNote(conn, state.status)) : null,
           ),
       },
@@ -66,7 +78,7 @@ export function deviceTable(conns, { onOpen, caption = "Connected devices" }) {
         cell: (conn) =>
           conn.decision
             ? frag(
-                accessChip(conn.decision.access),
+                truthChips(conn).decision,
                 conn.decision.alert ? chip("Alert", "c-deny") : null,
                 h("div", { class: "cell-sub" }, `by ${decisionLine(conn.decision)}`),
               )
@@ -103,12 +115,15 @@ export async function openDeviceDetail(conn) {
     const device = live.device;
     const truth = enforcementTruth(live, { watchOnly: isWatchOnly(state.status) });
     const decision = live.decision;
-    content.replaceChildren(
+    const chips = truthChips(live);
+    // replace(), not replaceChildren(): the DOM turns a null child into the text "null".
+    replace(
+      content,
       h(
         "div",
         { class: "row" },
-        stateChip(live.state),
-        decision ? accessChip(decision.access) : null,
+        chips.state,
+        chips.decision,
         confidenceChip(live),
         scanChip(live.scan),
         live.removed_at ? chip("Unplugged", "c-neutral") : null,
@@ -140,7 +155,7 @@ export async function openDeviceDetail(conn) {
         ? h(
             "div",
             { class: "stack" },
-            h("div", { class: "row" }, accessChip(decision.access), h("span", {}, `by ${decisionLine(decision)}`)),
+            h("div", { class: "row" }, truthChips(live).decision, h("span", {}, `by ${decisionLine(decision)}`)),
             h("ul", {}, decision.reasons.map((reason) => h("li", {}, reason))),
           )
         : h("p", { class: "muted" }, "No decision yet."),
@@ -212,7 +227,7 @@ export async function openDeviceDetail(conn) {
         : null,
     );
   } catch (error) {
-    content.replaceChildren(h("div", { class: "form-error", role: "alert" }, describeError(error)));
+    replace(content, h("div", { class: "form-error", role: "alert" }, describeError(error)));
   }
   return shown;
 }

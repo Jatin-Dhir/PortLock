@@ -164,7 +164,7 @@ export function enforcementTruth(conn, { watchOnly = false } = {}) {
       return {
         kind: "intended",
         headline: would ? `Would be ${would}` : "Would stay open",
-        detail: watchOnly ? "Watch-only: nothing was changed on this computer." : "Monitor mode: nothing was changed.",
+        detail: watchOnly ? "Watch-only: nothing was changed." : "Monitor mode: nothing was changed.",
         title: watchOnly
           ? "Watch-only: this is what PortLock would do if it could enforce"
           : "Monitor mode: this is what enforce mode would do",
@@ -192,6 +192,53 @@ export function enforcementTruth(conn, { watchOnly = false } = {}) {
   }
 }
 
+/**
+ * True when what a row shows is intended only: its State and Decision chips are then drawn
+ * dashed, like its enforcement chip, so no solid "Denied" or "Read-only" stands for a device
+ * the operating system was never asked to change.
+ */
+export function intendedOnly(conn, status) {
+  return Boolean(conn) && enforcementTruth(conn, { watchOnly: isWatchOnly(status) }).kind === "intended";
+}
+
+/**
+ * The key to the chip styles, worded for this process. `short` is the compact form for a
+ * panel header. In watch-only nothing is ever changed, so solid there cannot mean "changed".
+ */
+export function chipLegend(status) {
+  const watchOnly = isWatchOnly(status);
+  return [
+    {
+      label: "Solid",
+      short: watchOnly ? "Solid = as it is" : "Solid = in force",
+      tone: "c-neutral",
+      dashed: false,
+      hatch: false,
+      text: watchOnly
+        ? "means it is so now: watch-only blocks nothing and makes nothing read-only."
+        : "means it is in force: the operating system really was changed, or left open as decided.",
+    },
+    {
+      label: "Dashed",
+      short: "Dashed = intended only",
+      tone: "c-watch",
+      dashed: true,
+      hatch: false,
+      text: watchOnly
+        ? "means intended only (watch-only): nothing was changed."
+        : "means intended only (monitor mode): nothing was changed.",
+    },
+    {
+      label: "Not enforced",
+      short: null,
+      tone: "c-pending",
+      dashed: false,
+      hatch: true,
+      text: "means PortLock wanted to act and could not.",
+    },
+  ];
+}
+
 /** The one-line reading of a decision: "Pending, by policy default". */
 export function decisionLine(decision) {
   if (!decision) return "";
@@ -212,9 +259,14 @@ function simplePlural(n, one, many) {
 
 // ---- the bar on every page ---------------------------------------------------------------
 
+// The bar stays short (a label and one sentence) because it heads every page; the reason sits
+// behind its "Why" disclosure, and every other place that needs it points there.
 export const WATCH_ONLY_LEAD = "Watch-only";
-export const WATCH_ONLY_TEXT =
-  "This is the real PortLock, watching the USB devices on this computer. It shows and records what it sees, and changes nothing on this computer outside its own folder. Nothing is blocked.";
+export const WATCH_ONLY_TEXT = "Nothing is blocked: PortLock changes nothing on this computer outside its own folder.";
+export const WATCH_ONLY_WHY = "Why";
+
+/** Beside a control a watch-only process refuses: short, and pointing at the bar's reason. */
+export const WATCH_ONLY_CONTROL_NOTE = "Not available in watch-only. See Why at the top of the page.";
 
 /**
  * Which bar heads every page: the simulation's, the watch-only one, or none. Never both: a
@@ -223,9 +275,19 @@ export const WATCH_ONLY_TEXT =
 export function shellBanner({ simulation = false, status = null } = {}) {
   if (simulation) return { kind: "simulation", text: SIMULATION_TEXT };
   if (isWatchOnly(status)) {
-    return { kind: "watch_only", lead: WATCH_ONLY_LEAD, text: WATCH_ONLY_TEXT, reason: watchOnlyReason(status) };
+    return { kind: "watch_only", lead: WATCH_ONLY_LEAD, text: WATCH_ONLY_TEXT, why: WATCH_ONLY_WHY, reason: watchOnlyReason(status) };
   }
   return null;
+}
+
+/**
+ * The service's mode notes worth showing beside the mode. The watch-only reason is one of
+ * them, but it already sits behind the bar's "Why", so it is not repeated.
+ */
+export function modeNotes(mode) {
+  const notes = Array.isArray(mode?.notes) ? mode.notes : [];
+  const reason = watchOnlyReason(mode);
+  return notes.filter((note) => typeof note === "string" && note.trim() !== "" && note.trim() !== reason);
 }
 
 // ---- the overview's posture band ---------------------------------------------------------
@@ -319,20 +381,22 @@ const CHANGE_EXPLAIN = {
 
 /**
  * The words of one waiting change. A lockdown blocks for real in a process that can
- * enforce, monitor mode included; anything else blocks only while PortLock enforces. Where
- * nothing is really blocked, every sentence says "would".
+ * enforce, monitor mode included; anything else blocks only while PortLock enforces, so it
+ * is "real" only in enforce mode: an active lockdown blocks storage, but it does not make a
+ * wider scope or default-deny block in monitor mode. Where nothing is really blocked, every
+ * sentence says "would".
  */
 export function changeCopy(change, status) {
   const watchOnly = isWatchOnly(status);
-  const real = !watchOnly && (change.kind === "lockdown" || blocksForReal(status));
+  const real = !watchOnly && (change.kind === "lockdown" || status?.mode?.effective_mode === "enforce");
   const items = change.preview || [];
   const blocked = items.filter((item) => item.outcome === "block").length;
   const devices = `${items.length} connected device${items.length === 1 ? "" : "s"}`;
   const explain = real
     ? CHANGE_EXPLAIN[change.kind] || ""
     : watchOnly
-      ? "Nothing is blocked: PortLock is watch-only here and changes nothing on this computer."
-      : "Nothing is blocked yet: PortLock is in monitor mode.";
+      ? "Nothing is blocked: PortLock is watch-only here and changes nothing on this computer outside its own folder."
+      : "This change blocks nothing yet: PortLock is in monitor mode.";
   return {
     real,
     explain,
@@ -350,33 +414,74 @@ export function changeCopy(change, status) {
 
 // ---- what a device's own words may claim -------------------------------------------------
 
-function notChangedBecause(truth, watchOnly) {
-  if (watchOnly) return "PortLock is watch-only here and changes nothing on this computer.";
-  if (truth.kind === "intended") return "monitor mode changes nothing on this machine.";
-  return truth.detail || "it was not enforced.";
+/** `text` as a sentence: trimmed, and ending with a full stop unless it already ends one. */
+function sentence(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return "";
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-/** The toast after an approval. "now read-only" is said only when that was applied. */
+/** `text` to follow a colon: no closing full stop, and a capital lowered unless it starts a name. */
+function clause(text) {
+  const trimmed = String(text ?? "").trim().replace(/\.$/, "");
+  return /^[A-Z][a-z]/.test(trimmed) ? trimmed[0].toLowerCase() + trimmed.slice(1) : trimmed;
+}
+
+/**
+ * What went wrong, for a truth of the `none` kind, as a clause to follow "but" or a colon:
+ * "enforcement failed: access denied", "it cannot be enforced here".
+ */
+function failure(conn, truth) {
+  const enf = conn.enforcement;
+  const specific = clause(enf?.error || enf?.detail);
+  const withDetail = (text) => (specific ? `${text}: ${specific}` : text);
+  if (truth.detail === "Outside the enforcement scope.") return "it is outside the enforcement scope";
+  if (!conn.decision || !enf) return "it has not been enforced yet";
+  if (enf.outcome === "unsupported") return withDetail("it cannot be enforced here");
+  if (enf.outcome === "refused") return withDetail("the safety check refused it");
+  if (enf.outcome === "failed") return withDetail("enforcement failed");
+  return "it has not been enforced yet";
+}
+
+// Why an intended outcome changed nothing. Only for the `intended` kind: an enforcement that
+// failed is reported as a failure, never as "monitor mode".
+function notChangedBecause(watchOnly) {
+  return watchOnly
+    ? "PortLock is watch-only here and changes nothing on this computer outside its own folder."
+    : "monitor mode changes nothing on this machine.";
+}
+
+/**
+ * The toast after an approval. "now read-only" is said only when that was applied, and the
+ * tone is "bad" whenever enforcement should have happened and did not (failed, unsupported).
+ */
 export function approvalMessage(connection, status) {
   const watchOnly = isWatchOnly(status);
   const truth = enforcementTruth(connection, { watchOnly });
   const stateName = connection.state;
+  const shown = String(stateName).replace("_", "-");
   const still = stateName === "denied" || stateName === "pending";
-  const reason = connection.decision?.reasons?.[0] || "a policy rule applies";
+  const reason = sentence(connection.decision?.reasons?.[0] || "a policy rule applies");
   if (truth.kind === "real" || truth.kind === "protected") {
     return still
-      ? { text: `Grant recorded, but the device is still ${stateName}: ${reason}`, tone: "bad" }
-      : { text: `Approved: now ${stateName.replace("_", "-")}.`, tone: "good" };
+      ? { text: `Grant recorded, but the device is still ${shown}: ${reason}`, tone: "bad" }
+      : { text: `Approved: now ${shown}.`, tone: "good" };
   }
-  const why = notChangedBecause(truth, watchOnly);
+  if (truth.kind === "intended") {
+    const why = notChangedBecause(watchOnly);
+    return still
+      ? { text: `Grant recorded, but the decision is still ${shown}: ${reason} Nothing was blocked: ${why}`, tone: "bad" }
+      : { text: `Approved: the decision is ${shown}. Nothing on the device was changed: ${why}`, tone: "good" };
+  }
+  const wrong = failure(connection, truth);
   return still
-    ? { text: `Grant recorded, but the decision is still ${stateName}: ${reason}. Nothing was blocked: ${why}`, tone: "bad" }
-    : { text: `Approved: the decision is ${stateName.replace("_", "-")}. Nothing on the device was changed: ${why}`, tone: "good" };
+    ? { text: `Grant recorded, but the decision is still ${shown}: ${reason} It is not blocked either: ${wrong}.`, tone: "bad" }
+    : { text: `Approved: the decision is ${shown}, but ${wrong}.`, tone: "bad" };
 }
 
 /** The toast after a denial. "Denied" alone may only stand when the block was applied. */
 export function denialMessage(reply, status) {
-  if (reply.eject && !reply.eject.ok) return { text: `Denied, but the eject failed: ${reply.eject.error}`, tone: "bad" };
+  if (reply.eject && !reply.eject.ok) return { text: `Denied, but the eject failed: ${sentence(reply.eject.error)}`, tone: "bad" };
   const watchOnly = isWatchOnly(status);
   const truth = enforcementTruth(reply.connection, { watchOnly });
   const again = "It will be pending again if it is plugged in again.";
@@ -385,15 +490,37 @@ export function denialMessage(reply, status) {
   if (truth.kind === "real" || truth.kind === "protected") {
     return { text: `Denied for this connection. ${again}`, tone: "good" };
   }
-  return { text: `Denied for this connection, but it is not blocked: ${notChangedBecause(truth, watchOnly)} ${again}`, tone: "good" };
+  if (truth.kind === "intended") {
+    return { text: `Denied for this connection, but it is not blocked: ${notChangedBecause(watchOnly)} ${again}`, tone: "good" };
+  }
+  return { text: `Denied for this connection, but it is not blocked: ${failure(reply.connection, truth)}. ${again}`, tone: "bad" };
 }
 
-/** The line under a device held provisionally while its scan runs. */
+/**
+ * The line under a device held provisionally while its scan runs. "Held" only when the
+ * operating system holds it, "Would be held" only for an intended outcome, and "Not held"
+ * with the reason when enforcement failed or could not run.
+ */
 export function provisionalNote(conn, status) {
   const truth = enforcementTruth(conn, { watchOnly: isWatchOnly(status) });
-  if (truth.kind === "real" && conn.enforcement?.os_state === "read_only") return "Held read-only until its scan is clean";
-  if (truth.kind === "real" && conn.enforcement?.os_state === "blocked") return "Held blocked until its scan is clean";
-  return "Would be held read-only until its scan is clean";
+  const enf = conn.enforcement;
+  if (truth.kind === "real" && enf?.os_state === "read_only") return "Held read-only until its scan is clean";
+  if (truth.kind === "real" && enf?.os_state === "blocked") return "Held blocked until its scan is clean";
+  if (truth.kind === "intended") {
+    return enf?.would === "blocked" ? "Would be held blocked until its scan is clean" : "Would be held read-only until its scan is clean";
+  }
+  if (truth.kind === "protected") return "Not held: PortLock never touches this device";
+  if (truth.kind === "real") return "Not held: nothing needed enforcing";
+  return `Not held: ${failure(conn, truth)}`;
+}
+
+/** The text of the Held ports panel. A held port is blocked only while PortLock blocks for real. */
+export function portHoldText(status) {
+  const lead = "A port that sees too many arrivals in a short time is held";
+  const tail = "If you are sure it is safe, release it early.";
+  if (blocksForReal(status)) return `${lead} blocked for a cool-down. ${tail}`;
+  const why = isWatchOnly(status) ? "PortLock is watch-only on this computer" : "PortLock is in monitor mode";
+  return `${lead} for a cool-down. ${why}, so the port is not really blocked. ${tail}`;
 }
 
 /** The note in a device's detail when nothing was done to it because PortLock only watches. */
@@ -406,6 +533,6 @@ export function intendedNote(status) {
 /** The note on a pending card whose device is not blocked while it waits. */
 export function pendingWaitNote(status) {
   return isWatchOnly(status)
-    ? "Watch-only: this device is NOT blocked while it waits. Approving or denying it records your decision and changes nothing on this computer."
+    ? "Watch-only: this device is NOT blocked while it waits. Approving or denying it records your decision and changes nothing on this computer outside its own folder."
     : "Monitor mode: this device is NOT blocked while it waits. Approving it changes nothing yet.";
 }

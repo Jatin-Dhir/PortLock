@@ -26,7 +26,9 @@ import path::
 
     python -B flight_recorder.py <portlock arguments...>
 
-The report (JSON) is rewritten once a second and at exit, so it survives a hard kill. It
+The report (JSON) is written once the tripwires are armed, then once a second and at exit,
+so it survives a hard kill; its ``writes`` counter lets a test wait for a report that
+covers what the process did up to a moment it chose. It
 holds counts, program names, option words and paths under the home directory, and never a
 device name, serial number or instance identifier.
 """
@@ -163,6 +165,7 @@ class Recorder:
             "sockets_bound": {},
             "sockets_connected": {},
             "exit": None,
+            "writes": 0,
         }
 
     # --- helpers ---------------------------------------------------------------------
@@ -339,6 +342,7 @@ class Recorder:
         self._local.busy = True
         try:
             with self._lock:
+                self.state["writes"] += 1
                 snapshot = json.dumps(self.state, indent=1, sort_keys=True, default=str)
             temporary = self._report + ".tmp"
             with contextlib.suppress(OSError):
@@ -362,6 +366,9 @@ def main() -> int:
     code: object = None
     try:
         recorder.arm_seams()
+        # A report exists from the start: a process killed within its first second (a
+        # fast machine) must not leave none at all.
+        recorder.write()
         from portlock.console.cli import main as portlock_main
 
         code = portlock_main(sys.argv[1:])

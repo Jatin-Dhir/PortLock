@@ -6,7 +6,7 @@ import { count, countdown, liveAgo, plural, timeEl } from "../fmt.js";
 import { deviceTable, openDeviceDetail } from "../devicetable.js";
 import { mountPending } from "../pending.js";
 import { scope, state } from "../store.js";
-import { DEGRADED_TEXT, POSTURE_TEXT, enforcementTruth, posture, postureCopy } from "../truth.js";
+import { DEGRADED_TEXT, POSTURE_TEXT, chipLegend, enforcementTruth, posture, postureCopy } from "../truth.js";
 import { chip, empty, pageHead, panel, severityChip } from "../ui.js";
 
 function wouldChange() {
@@ -151,7 +151,13 @@ export function mount(root) {
     healthHost,
     statsHost,
     panel("Needs a decision", pendingHost),
-    panel("Connected devices", devicesHost, chip("Solid = in force", "c-neutral"), chip("Dashed = intended only", "c-watch", { dashed: true })),
+    panel(
+      "Connected devices",
+      devicesHost,
+      chipLegend(state.status)
+        .filter((item) => item.short)
+        .map((item) => chip(item.short, item.tone, { dashed: item.dashed })),
+    ),
     panel("Alerts", alertsHost),
   );
 

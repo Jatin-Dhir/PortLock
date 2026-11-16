@@ -1,11 +1,12 @@
 // Devices: connected now, the history of connections, and every device ever seen.
 
 import { api, seg } from "../api.js";
-import { deviceIdentity, deviceTable, openDeviceDetail, confidenceChip } from "../devicetable.js";
+import { deviceIdentity, deviceTable, openDeviceDetail, confidenceChip, truthChips } from "../devicetable.js";
 import { h, replace } from "../dom.js";
 import { count, liveAgo, shortFp, timeEl } from "../fmt.js";
 import { scope, state } from "../store.js";
-import { accessChip, button, chip, empty, enforcementCell, errorState, infoDialog, kv, loading, pageHead, stateChip, table, textInput, field } from "../ui.js";
+import { chipLegend } from "../truth.js";
+import { button, chip, chipLegendLine, empty, enforcementCell, errorState, infoDialog, kv, loading, pageHead, table, textInput, field } from "../ui.js";
 
 const TABS = [
   ["connected", "Connected now"],
@@ -13,17 +14,9 @@ const TABS = [
   ["known", "Every device seen"],
 ];
 
+// The words come from truth.js, so the key reads correctly in watch-only too.
 function legend() {
-  return h(
-    "p",
-    { class: "legend" },
-    chip("Solid", "c-neutral"),
-    "means the operating system was really changed.",
-    chip("Dashed", "c-watch", { dashed: true }),
-    "means intended only (monitor mode): nothing was changed.",
-    chip("Not enforced", "c-pending", { hatch: true }),
-    "means PortLock wanted to act and could not.",
-  );
+  return chipLegendLine(chipLegend(state.status));
 }
 
 /** A list read page by page. `fetchPage(cursor)` returns `{items, next}`. */
@@ -93,7 +86,7 @@ async function openKnown(device) {
             rows: detail.connections,
             columns: [
               { label: "#", cell: (c) => h("button", { class: "linkish", type: "button", onclick: () => openDeviceDetail(c) }, String(c.connection_id)) },
-              { label: "State", cell: (c) => stateChip(c.state) },
+              { label: "State", cell: (c) => truthChips(c).state },
               { label: "Connected", cell: (c) => timeEl(c.connected_at) },
               { label: "Unplugged", cell: (c) => (c.removed_at ? timeEl(c.removed_at) : "still connected") },
             ],
@@ -136,8 +129,8 @@ export function mount(root) {
               confidenceChip(c),
             ],
           },
-          { label: "State", cell: (c) => stateChip(c.state) },
-          { label: "Decision", cell: (c) => (c.decision ? accessChip(c.decision.access) : "none") },
+          { label: "State", cell: (c) => truthChips(c).state },
+          { label: "Decision", cell: (c) => truthChips(c).decision || "none" },
           { label: "Enforcement", cell: (c) => enforcementCell(c) },
           { label: "Connected", cell: (c) => timeEl(c.connected_at) },
           { label: "Left", cell: (c) => (c.removed_at ? [timeEl(c.removed_at), h("div", { class: "cell-sub" }, c.close_reason || "")] : "still connected") },

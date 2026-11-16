@@ -378,8 +378,9 @@ operating-system dead-man timer is set).
 
 `mode` (the chosen mode), `effective_mode` (what is in force), both `"monitor"` \|
 `"enforce"`; `source` (`"config"` \| `"setting"` \| `"killswitch"`); `killswitch` (bool);
-`can_enforce` (bool); `notes` (array<string>: why it cannot, if it cannot);
-`watch_only` (bool); `watch_only_reason` (string \| null).
+`can_enforce` (bool); `notes` (array<string>: why it cannot, if it cannot; each a
+sentence of its own, with a capital letter and a full stop, which a console may show as
+a paragraph); `watch_only` (bool); `watch_only_reason` (string \| null).
 
 `watch_only` is true for a process that can never be trusted to enforce: it is not
 elevated, or its state or configuration directory is not a system-wide location (DESIGN
@@ -388,7 +389,11 @@ does not decide it. `watch_only_reason` then says, in one or two plain sentences
 PortLock cannot do here and why (for example "PortLock cannot change this computer: it is
 not running as administrator, and its files are in this user's own folders, which every
 program this user runs could change. It stays watch-only: it shows and records, and blocks
-nothing."); it is `null` when `watch_only` is false. In a watch-only process
+nothing."). The part about the location is true for the case at hand: this user's own
+folders, another user's folders, the folder all users share, the home folder of the
+account that runs it (root's `/root`), or a location PortLock cannot confirm is local and
+system-wide (a network or device path, or a profile variable it could not read). It is
+`null` when `watch_only` is false. In a watch-only process
 `effective_mode` is always `"monitor"`, `can_enforce` is false, and the same sentence is
 the message of every `watch_only` error. A console reads these two fields, and nothing
 else, to know whether the process is watch-only. An elevated process with system-wide
@@ -441,16 +446,18 @@ In a watch-only process (4.13) no enforcement mechanism is probed and no command
 used; `guard.block` to `guard.baseline_read_only`, `guard.state_dir`, `guard.config_dir`
 and `service.privacy` are `info` lines that say they were not probed or checked (never
 `ok`); `service.scan_engines` says in its `detail` that antivirus engines are not used in
-watch-only. In any other process `guard.watch_only` says it is not watch-only and every
-mechanism is probed.
+watch-only; `guard.directories` says why the directories are not system-wide, in the
+same words as the reason. In any other process `guard.watch_only` says it is not
+watch-only and every mechanism is probed.
 
 ### 4.16 `Settings`
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `config` | object | `Config.to_dict()`: the configuration file as loaded. Read-only here |
-| `runtime` | {`protected_fingerprints`: array<fingerprint>, `scan.enabled`: bool, `lockdown.default_minutes`: int, `scope`: string, `default_deny`: bool} | the three values `PATCH /settings` can change, and the two that have their own endpoints (`/scope`, `/default-deny`) |
-| `effective` | {`scan_enabled`: bool, `lockdown_default_minutes`: int, `hid_enforcement_enabled`: bool, `scope`: string, `fail_closed`: bool, `baseline_read_only`: bool} | what is in force |
+| `runtime` | {`protected_fingerprints`: array<fingerprint>, `scan.enabled`: bool, `lockdown.default_minutes`: int, `scope`: string, `default_deny`: bool} | the three values `PATCH /settings` can change, and the two that have their own endpoints (`/scope`, `/default-deny`); `default_deny` is the value in force (as `GET /default-deny`'s `enabled`) |
+| `effective` | {`scan_enabled`: bool, `lockdown_default_minutes`: int, `hid_enforcement_enabled`: bool, `scope`: string, `fail_closed`: bool, `baseline_read_only`: bool, `default_deny`: bool} | what is in force |
+| `notes` | array<string> | sentences about settings that do not take effect as stored: in a watch-only process, a default-deny an earlier run stored on ("A default-deny setting stored by an earlier run is ignored: ..."); otherwise empty |
 
 ### 4.17 `Change` (a change waiting for confirmation)
 
@@ -648,7 +655,13 @@ kill-switch file need no login at all.
 4. **Without the service.** `init`, `recover`, `user reset-password --local`,
    `user unlock --local`, `audit verify --offline`, `policy validate`, `doctor --offline`,
    `service print-unit`, `service print-task` and `simulate` do not use this API
-   (`docs/ARCHITECTURE.md` 4.2).
+   (`docs/ARCHITECTURE.md` 4.2). `init` refuses while a service runs from the same state
+   directory (stop it first, then start it again after `init`), so that every audit
+   record after `init` carries the MAC of the key it shows.
+5. **When the instance lock cannot be opened** (another user's or an administrator's
+   installation), `status` and `stop` fall back to `runtime.json` and the verified ping
+   of step 2; if that file cannot be read either, they say plainly that they cannot tell
+   whether the service is running, and why (exit code 4).
 
 The **first administrator** is created by `portlock init` on the machine, never through
 this API. Until then `GET /ping` reports `setup_required: true` and every login fails.
@@ -1164,7 +1177,9 @@ the password is checked on the network channel and `locked_out` applies.
 
 If the service is not running, the lockdown is lifted with `portlock recover`, which
 needs operating-system administrator rights and no PortLock login. `recover` refuses a
-per-user home: any program the user runs could have written its journal, and a PortLock
+home that is not a system-wide location (this user's or another user's folders, the
+folder all users share, root's own home, or a location it cannot confirm is local):
+programs other than an administrator's could have written its journal, and a PortLock
 kept there is watch-only and never changed anything.
 
 ### 6.12 Mode, scope, default-deny, doctor, settings
@@ -1180,7 +1195,7 @@ In a watch-only process (4.13):
 
 ```json
 {"mode": "monitor", "effective_mode": "monitor", "source": "config", "killswitch": false, "can_enforce": false,
- "notes": ["PortLock cannot change this computer: ...", "antivirus engines are not used in watch-only: ..."],
+ "notes": ["PortLock cannot change this computer: ...", "Antivirus engines are not used in watch-only: ..."],
  "watch_only": true,
  "watch_only_reason": "PortLock cannot change this computer: it is not running as administrator, and its files are in this user's own folders, which every program this user runs could change. It stays watch-only: it shows and records, and blocks nothing."}
 ```
@@ -1220,7 +1235,17 @@ enforcement of DESIGN §2 needs two further settings in the configuration file a
 reachable here.)
 
 **`GET /default-deny` — `view`.** Response: `enabled` (bool): standing operating-system
-default-deny for new devices in enforce mode.
+default-deny for new devices in enforce mode, as it is in force; `stored` (bool): the
+stored setting; `note` (string \| null). A watch-only process denies nothing: there
+`enabled` is false even when an earlier, enforcing run stored it on, `stored` is true and
+`note` says that the stored setting is ignored. Elsewhere `enabled` equals `stored` and
+`note` is null. `portlock default-deny` prints the note under its answer.
+
+```json
+// GET /default-deny in a watch-only process that finds it stored on
+{"enabled": false, "stored": true,
+ "note": "A default-deny setting stored by an earlier run is ignored: this process is watch-only and denies nothing."}
+```
 
 **`PUT /default-deny` — `change_mode`.** Request: `enabled` (bool). Turning it on is
 applied under commit-confirm. Response 200: `enabled`, `summary`, `change`. Errors: 409

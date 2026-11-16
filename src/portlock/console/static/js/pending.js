@@ -8,7 +8,7 @@ import { h, replace, uid } from "./dom.js";
 import { bytes, liveAgo } from "./fmt.js";
 import { applyEvent, can, scope, state } from "./store.js";
 import { approvalMessage, decisionLine, denialMessage, enforcementTruth, isWatchOnly, pendingWaitNote } from "./truth.js";
-import { button, checkbox, chip, empty, enforcementCell, field, select, tags, textInput, toast } from "./ui.js";
+import { button, checkbox, chip, empty, enforcementCell, field, select, stateChip, tags, textInput, toast } from "./ui.js";
 
 const DURATIONS = [
   ["30m", "30 minutes"],
@@ -122,7 +122,7 @@ function describe(conn) {
     { class: "pcard-info" },
     h("div", {}, h("button", { class: "linkish pcard-title", type: "button", onclick: () => openDeviceDetail(conn) }, conn.display_name || "Unnamed device")),
     h("div", { class: "cell-sub mono" }, deviceIdentity(device)),
-    h("div", { class: "row" }, chip("Pending", "c-pending"), confidenceChip(conn), conn.decision && conn.decision.alert ? chip("Alert", "c-deny") : null),
+    h("div", { class: "row" }, stateChip("pending", { dashed: truth.kind === "intended" }), confidenceChip(conn), conn.decision && conn.decision.alert ? chip("Alert", "c-deny") : null),
     device.categories.length ? tags(device.categories) : null,
     volumes ? h("div", { class: "cell-sub" }, `Volume: ${volumes}`) : null,
     h("div", { class: "cell-sub" }, "Plugged in ", liveAgo(conn.connected_at)),

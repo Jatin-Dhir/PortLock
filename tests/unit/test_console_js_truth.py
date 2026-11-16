@@ -80,6 +80,11 @@ function applied(osState) {
            mechanism: "fake.mechanism", detail: null };
 }
 
+function failed(error, outcome = "failed") {
+  return { outcome, would: null, os_state: "open", tier: "none", mechanism: null,
+           detail: null, error };
+}
+
 const wouldBlock = would("blocked");
 const wouldReadOnly = would("read_only");
 const appliedBlock = applied("blocked");
@@ -145,7 +150,264 @@ const results = {
   string_true: T.isWatchOnly({ mode: { watch_only: "true" } }),
   no_reason_sent: T.watchOnlyReason({ mode: { watch_only: true } }),
 };
+
+// K1: the key to the chip styles, and which rows are intended only.
+const enforcing = status({ effective: "enforce" });
+const monitorLockdown = status({ effective: "monitor", lockdown: lockActive });
+const plainMonitor = status({ effective: "monitor" });
+results.legend = {
+  watch_only: T.chipLegend?.(watchOnly) ?? null,
+  monitor: T.chipLegend?.(plainMonitor) ?? null,
+};
+results.intended_only = {
+  would: T.intendedOnly?.(conn({ enforcement: wouldBlock }), watchOnly) ?? null,
+  applied: T.intendedOnly?.(conn({ enforcement: appliedBlock }), enforcing) ?? null,
+  failed: T.intendedOnly?.(conn({ enforcement: failed("access denied") }), enforcing) ?? null,
+};
+
+// K2: the bar's sentence, and mode notes that repeat the reason.
+const notedWatchOnly = status({ watchOnly: true });
+notedWatchOnly.mode.notes = [REASON, "Antivirus engines are not used in watch-only."];
+results.mode_notes = T.modeNotes?.(notedWatchOnly.mode) ?? null;
+results.control_note = T.WATCH_ONLY_CONTROL_NOTE ?? null;
+
+// K3: enforce mode, enforcement failed or unsupported.
+const failedPlain = failed(null);
+const failedDetail = failed("access denied");
+const unsupported = failed(null, "unsupported");
+const held = (enforcement, state = "read_only") => conn({ state, enforcement, provisional: true });
+const denyOf = (enforcement) => T.denialMessage({ connection: conn({ enforcement }), eject: null },
+                                                enforcing);
+results.enforce_failed = {
+  approval: T.approvalMessage(
+    conn({ state: "allowed", access: "allow", enforcement: failedDetail }), enforcing),
+  approval_still: T.approvalMessage(conn({ state: "denied", enforcement: failedPlain }), enforcing),
+  denial: denyOf(failedPlain),
+  denial_unsupported: denyOf(unsupported),
+  provisional_plain: T.provisionalNote(held(failedPlain), enforcing),
+  provisional_detail: T.provisionalNote(held(failedDetail), enforcing),
+  provisional_unsupported: T.provisionalNote(held(unsupported), enforcing),
+  provisional_would_block: T.provisionalNote(held(wouldBlock, "denied"), plainMonitor),
+  still_applied: T.approvalMessage(conn({ state: "denied", enforcement: appliedBlock }), enforcing),
+};
+
+// K5: a wider scope while a real lockdown is active in monitor mode, and the held ports.
+results.scope_during_monitor_lockdown = T.changeCopy({ kind: "widen_scope", preview },
+                                                     monitorLockdown);
+results.default_deny_during_monitor_lockdown = T.changeCopy({ kind: "default_deny", preview },
+                                                            monitorLockdown);
+results.port_hold = {
+  enforce: T.portHoldText?.(enforcing) ?? null,
+  monitor: T.portHoldText?.(plainMonitor) ?? null,
+  monitor_lockdown: T.portHoldText?.(monitorLockdown) ?? null,
+  watch_only: T.portHoldText?.(watchOnly) ?? null,
+};
 process.stdout.write(JSON.stringify(results));
+"""
+
+# The console's DOM-building modules, run under Node with a minimal document stub: what the
+# device table, the device dialog, the watch-only bar and the legend really draw. fmt.js keeps
+# a page-wide timer, so the script exits by itself once it has written its answer.
+DOM_SCRIPT = r"""
+class Node {}
+class Text extends Node {
+  constructor(text) { super(); this.textContent = String(text); this.parentNode = null; }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+}
+class Element extends Node {
+  constructor(tag) {
+    super();
+    this.tagName = tag; this.attrs = {}; this.children = []; this.dataset = {};
+    this.parentNode = null;
+    this.style = { setProperty() {} };
+  }
+  setAttribute(key, value) { this.attrs[key] = String(value); }
+  getAttribute(key) { return key in this.attrs ? this.attrs[key] : null; }
+  removeAttribute(key) { delete this.attrs[key]; }
+  appendChild(child) {
+    if (child instanceof Element && child.tagName === "#fragment") {
+      for (const inner of [...child.children]) this.appendChild(inner);
+      return child;
+    }
+    if (child.parentNode) child.parentNode.removeChild(child);
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    this.children = this.children.filter((c) => c !== child);
+    child.parentNode = null;
+  }
+  insertBefore(child, ref) {
+    this.appendChild(child);
+    if (ref) {
+      this.children = this.children.filter((c) => c !== child);
+      this.children.splice(this.children.indexOf(ref), 0, child);
+    }
+    return child;
+  }
+  replaceChildren(...children) {
+    // As in a browser: anything that is not a node becomes text, null included ("null").
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+    for (const child of children) {
+      this.appendChild(child instanceof Node ? child : new Text(String(child)));
+    }
+  }
+  replaceWith(other) {
+    const parent = this.parentNode;
+    if (!parent) return;
+    parent.insertBefore(other, this);
+    parent.removeChild(this);
+  }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  get firstChild() { return this.children[0] || null; }
+  get isConnected() { return true; }
+  addEventListener() {}
+  showModal() {}
+  close() {}
+  scrollIntoView() {}
+  set className(value) { this.attrs.class = value; }
+  get className() { return this.attrs.class || ""; }
+  get textContent() { return this.children.map((c) => c.textContent).join(""); }
+  set textContent(value) { this.replaceChildren(new Text(value)); }
+}
+globalThis.Node = Node;
+const body = new Element("body");
+globalThis.document = {
+  body,
+  createElement: (tag) => new Element(tag),
+  createTextNode: (text) => new Text(text),
+  createDocumentFragment: () => new Element("#fragment"),
+  getElementById: () => null,
+};
+globalThis.location = { href: "http://127.0.0.1/" };
+
+const base = process.argv[2];
+const REASON = process.argv[3];
+const ui = await import(base + "/ui.js");
+const store = await import(base + "/store.js");
+const table = await import(base + "/devicetable.js");
+const T = await import(base + "/truth.js");
+
+function statusOf({ effective = "monitor", watchOnly = false }) {
+  return {
+    mode: { mode: effective, effective_mode: effective, source: "config", killswitch: false,
+            notes: [], can_enforce: !watchOnly, watch_only: watchOnly,
+            watch_only_reason: watchOnly ? REASON : null },
+    lockdown: { state: "idle", active: false, external_timer_armed: false },
+    enforcer: { name: watchOnly ? "watch-only" : "fake", block: !watchOnly,
+                read_only: !watchOnly, eject: !watchOnly, default_deny: !watchOnly },
+  };
+}
+
+function connOf(stateName, access, enforcement) {
+  return {
+    connection_id: 7, display_name: "Example stick", fingerprint: "fp:example",
+    state: stateName, provisional: false, protected: false, protection_codes: [],
+    confidence: "high", basis: ["vid", "pid", "serial"], removed_at: null,
+    connected_at: "2026-01-01T00:00:00Z", scan: null,
+    device: { vid: 4617, pid: 1, serial: "SYNTHETIC-1", manufacturer: "Example",
+              product: "Stick", bcd_device: 256, device_class: 0, bus_path: "1-1",
+              removable: true, categories: ["storage"], interfaces: [], volumes: [] },
+    decision: { access, source: "policy", rule_id: null, reasons: ["synthetic reason"],
+                alert: false },
+    enforcement,
+  };
+}
+const would = (what) => ({ outcome: "would_apply", would: what, os_state: "open", tier: "none",
+                           mechanism: null, detail: null });
+const applied = (what) => ({ outcome: "applied", would: null, os_state: what, tier: "reactive",
+                             mechanism: "fake.mechanism", detail: null });
+
+function chips(node, out = []) {
+  if (node instanceof Element) {
+    const cls = (node.getAttribute("class") || "").split(" ");
+    if (cls.includes("chip")) out.push({ text: node.textContent, dashed: cls.includes("dashed") });
+    for (const child of node.children) chips(child, out);
+  }
+  return out;
+}
+
+function find(node, test) {
+  if (!(node instanceof Element)) return null;
+  if (test(node)) return node;
+  for (const child of node.children) {
+    const hit = find(child, test);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// The State and Decision cells of each row of the device table.
+function rowCells(conns) {
+  const drawn = table.deviceTable(conns, { onOpen() {} });
+  const tbody = find(drawn, (el) => el.tagName === "tbody");
+  return tbody.children.map((tr) => ({
+    state: chips(tr.children[1]),
+    decision: chips(tr.children[2]),
+  }));
+}
+
+const out = {};
+store.state.status = statusOf({ watchOnly: true });
+out.watch_only_rows = rowCells([
+  connOf("denied", "deny", would("blocked")),
+  connOf("read_only", "read_only", would("read_only")),
+]);
+
+// The device dialog, with the service's two answers stubbed.
+let live = connOf("denied", "deny", would("blocked"));
+globalThis.fetch = async (url) => {
+  const payload = url.includes("/connections/")
+    ? { connection: live, decisions: [], scans: [] }
+    : { connection_count: 1, first_seen: "2026-01-01T00:00:00Z", grants: [] };
+  return { status: 200, ok: true, json: async () => payload };
+};
+async function dialogChips() {
+  body.replaceChildren();
+  table.openDeviceDetail(live);
+  for (let i = 0; i < 50; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  const dialog = find(body, (el) => el.tagName === "dialog");
+  const row = find(dialog, (el) => (el.getAttribute("class") || "") === "row");
+  return { chips: chips(row), shows_null: /\bnull\b/.test(dialog.textContent) };
+}
+out.watch_only_dialog = await dialogChips();
+
+store.state.status = statusOf({ effective: "enforce" });
+out.enforcing_rows = rowCells([connOf("denied", "deny", applied("blocked"))]);
+live = connOf("denied", "deny", applied("blocked"));
+out.enforcing_dialog = await dialogChips();
+
+function collapsedText(node) {
+  // Everything the bar shows while "Why" is closed: the details' own content is hidden.
+  if (!(node instanceof Element)) return node.textContent;
+  if (node.tagName === "details") {
+    return node.children.filter((c) => c.tagName === "summary").map((c) => c.textContent).join("");
+  }
+  return node.children.map(collapsedText).join(" ");
+}
+const bar = ui.shellBar
+  ? ui.shellBar(T.shellBanner({ simulation: false, status: statusOf({ watchOnly: true }) }))
+  : null;
+out.bar = bar
+  ? {
+      collapsed: collapsedText(bar).replace(/\s+/g, " ").trim(),
+      summary: find(bar, (el) => el.tagName === "summary")?.textContent ?? null,
+      hidden: find(bar, (el) => el.tagName === "details")?.children
+        .filter((c) => c.tagName !== "summary").map((c) => c.textContent).join(" ") ?? null,
+      label: bar.getAttribute("aria-label"),
+    }
+  : null;
+
+out.legend_line = ui.chipLegendLine && T.chipLegend
+  ? (() => {
+      const line = ui.chipLegendLine(T.chipLegend(statusOf({ watchOnly: true })));
+      return { text: line.textContent, chips: chips(line) };
+    })()
+  : null;
+
+process.stdout.write(JSON.stringify(out), () => process.exit(0));
 """
 
 
@@ -174,6 +436,29 @@ def said(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     assert done.returncode == 0, done.stderr
     result: dict[str, Any] = json.loads(done.stdout)
     return result
+
+
+@pytest.fixture(scope="module")
+def drawn(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """What the DOM-building modules draw, under a minimal document stub."""
+    assert NODE is not None
+    script = tmp_path_factory.mktemp("node-dom") / "drawn.mjs"
+    script.write_text(DOM_SCRIPT, encoding="utf-8")
+    done = subprocess.run(
+        [NODE, str(script), (STATIC / "js").as_uri(), REASON],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    result: dict[str, Any] = json.loads(done.stdout)
+    return result
+
+
+def js_source(relative: str) -> str:
+    return (STATIC / "js" / relative).read_text(encoding="utf-8")
 
 
 # --- truth.js stays importable without a browser -----------------------------------------
@@ -237,9 +522,10 @@ def test_watch_only_bar_states_what_it_is_and_why(said: dict[str, Any]) -> None:
     banner = said["watch_only"]["banner"]
     assert banner["kind"] == "watch_only"
     assert banner["lead"] == "Watch-only"
-    assert "real PortLock" in banner["text"]
-    assert "changes nothing on this computer outside its own folder" in banner["text"]
-    assert "Nothing is blocked." in banner["text"]
+    assert banner["text"] == (
+        "Nothing is blocked: PortLock changes nothing on this computer outside its own folder."
+    )
+    assert banner["why"] == "Why"
     assert banner["reason"] == REASON
 
 
@@ -286,9 +572,10 @@ def test_a_would_apply_device_reads_would_in_watch_only(said: dict[str, Any]) ->
     truth = case["truth"]
     assert truth["kind"] == "intended"
     assert truth["headline"] == "Would be blocked"
-    assert truth["detail"] == "Watch-only: nothing was changed on this computer."
+    assert truth["detail"] == "Watch-only: nothing was changed."
     assert truth["title"].startswith("Watch-only")
-    assert case["provisional"] == "Would be held read-only until its scan is clean"
+    # The words follow what the service says it would do (`would`: blocked here).
+    assert case["provisional"] == "Would be held blocked until its scan is clean"
     assert "If it could enforce, 1 connected device would be blocked" in text_of(case["copy"])
 
 
@@ -395,3 +682,202 @@ def test_only_an_explicit_true_is_watch_only(said: dict[str, Any]) -> None:
     assert said["missing_field"] is False
     assert said["string_true"] is False
     assert said["no_reason_sent"].startswith("PortLock is not running as an administrator")
+
+
+# --- K1: a row whose enforcement is only intended is drawn dashed -------------------------
+
+
+def test_watch_only_rows_draw_state_and_decision_dashed(drawn: dict[str, Any]) -> None:
+    rows = drawn["watch_only_rows"]
+    assert [[c["text"] for c in row["state"]] for row in rows] == [["Denied"], ["Read-only"]]
+    assert [[c["text"] for c in row["decision"]] for row in rows] == [["Denied"], ["Read-only"]]
+    for row in rows:
+        assert all(c["dashed"] for c in row["state"] + row["decision"]), row
+
+
+def test_the_device_dialog_draws_intended_chips_dashed(drawn: dict[str, Any]) -> None:
+    dialog = drawn["watch_only_dialog"]
+    assert [c["text"] for c in dialog["chips"]] == ["Denied", "Denied"]
+    assert all(c["dashed"] for c in dialog["chips"])
+    assert dialog["shows_null"] is False  # a null child once became the text "null"
+
+
+def test_an_applied_block_stays_solid(drawn: dict[str, Any]) -> None:
+    (row,) = drawn["enforcing_rows"]
+    assert row["state"] == [{"text": "Denied", "dashed": False}]
+    assert row["decision"] == [{"text": "Denied", "dashed": False}]
+    assert drawn["enforcing_dialog"]["chips"] == [
+        {"text": "Denied", "dashed": False},
+        {"text": "Denied", "dashed": False},
+    ]
+
+
+def test_intended_only_is_decided_by_the_enforcement_truth(said: dict[str, Any]) -> None:
+    assert said["intended_only"] == {"would": True, "applied": False, "failed": False}
+
+
+def test_the_chip_legend_reads_correctly_in_watch_only(said: dict[str, Any]) -> None:
+    legend = said["legend"]["watch_only"]
+    assert legend is not None, "truth.js must word the legend"
+    by_label = {item["label"]: item for item in legend}
+    assert by_label["Dashed"]["text"] == "means intended only (watch-only): nothing was changed."
+    assert "monitor mode" not in " ".join(item["text"] for item in legend)
+    # Nothing is ever changed in watch-only, so solid cannot be "really was changed" there.
+    assert "changed" not in by_label["Solid"]["text"]
+    assert by_label["Solid"]["short"] == "Solid = as it is"
+    monitor = {item["label"]: item for item in said["legend"]["monitor"]}
+    assert monitor["Dashed"]["text"] == "means intended only (monitor mode): nothing was changed."
+    assert monitor["Solid"]["short"] == "Solid = in force"
+
+
+def test_the_legend_line_is_drawn_from_truth_js(drawn: dict[str, Any]) -> None:
+    line = drawn["legend_line"]
+    assert line is not None
+    assert [c["text"] for c in line["chips"]] == ["Solid", "Dashed", "Not enforced"]
+    assert [c["dashed"] for c in line["chips"]] == [False, True, False]
+    assert "(watch-only)" in line["text"]
+    for view in ("views/devices.js", "views/overview.js"):
+        source = js_source(view)
+        assert "chipLegend(" in source, view
+        assert "intended only (monitor mode)" not in source, view
+        assert "Solid = in force" not in source, view
+
+
+def test_every_state_and_decision_chip_of_a_connection_goes_through_truth_chips() -> None:
+    for name in ("devicetable.js", "views/devices.js"):
+        source = js_source(name)
+        assert not re.search(r"stateChip\((?:conn|live|c)\.state\)", source), name
+        assert not re.search(r"accessChip\((?:conn|live|c)\.decision\.access\)", source), name
+        assert not re.search(r"accessChip\(decision\.access\)", source), name
+
+
+# --- K2: a short bar, the reason behind "Why", and no repeats on Protection --------------
+
+
+def test_the_watch_only_bar_is_one_sentence_with_the_reason_behind_why(
+    drawn: dict[str, Any],
+) -> None:
+    bar = drawn["bar"]
+    assert bar is not None, "ui.js must draw the bar"
+    assert bar["label"] == "Watch-only"
+    assert bar["summary"] == "Why"
+    assert bar["hidden"] == REASON
+    assert REASON not in bar["collapsed"]
+    assert bar["collapsed"] == (
+        "Watch-only Nothing is blocked: PortLock changes nothing on this computer outside "
+        "its own folder. Why"
+    )
+    # About two lines of 13 px text at 400 px; it was nine lines with the reason shown.
+    assert len(bar["collapsed"]) <= 110
+
+
+def test_mode_notes_drop_the_reason_the_bar_already_gives(said: dict[str, Any]) -> None:
+    assert said["mode_notes"] == ["Antivirus engines are not used in watch-only."]
+
+
+def test_disabled_controls_point_at_the_reason_instead_of_repeating_it(
+    said: dict[str, Any],
+) -> None:
+    note = said["control_note"]
+    assert note == "Not available in watch-only. See Why at the top of the page."
+    protection = js_source("views/protection.js")
+    assert "return WATCH_ONLY_CONTROL_NOTE;" in protection
+    assert "Not available: ${watchOnlyReason" not in protection
+    assert "modeNotes(mode)" in protection and "mode.notes.map" not in protection
+    # One short note beside each of the three disabled controls, and each is that note.
+    assert len(re.findall(r"reasonFor\([^,]+, notHere\(\)\)", protection)) == 3
+    assert protection.count("reasonFor(") == 3
+
+
+# --- K3: enforce mode, enforcement that failed --------------------------------------------
+
+
+def test_failed_enforcement_never_reads_as_success(said: dict[str, Any]) -> None:
+    case = said["enforce_failed"]
+    assert case["approval"] == {
+        "text": "Approved: the decision is allowed, but enforcement failed: access denied.",
+        "tone": "bad",
+    }
+    assert case["approval_still"] == {
+        "text": "Grant recorded, but the decision is still denied: synthetic reason. "
+        "It is not blocked either: enforcement failed.",
+        "tone": "bad",
+    }
+    assert case["denial"] == {
+        "text": "Denied for this connection, but it is not blocked: enforcement failed. "
+        "It will be pending again if it is plugged in again.",
+        "tone": "bad",
+    }
+    assert case["denial_unsupported"]["tone"] == "bad"
+    assert "it cannot be enforced here" in case["denial_unsupported"]["text"]
+    for toast in (case["approval"], case["approval_still"], case["denial"]):
+        assert "monitor mode" not in toast["text"] and "Would" not in toast["text"]
+
+
+def test_a_failed_provisional_hold_says_not_held(said: dict[str, Any]) -> None:
+    case = said["enforce_failed"]
+    assert case["provisional_plain"] == "Not held: enforcement failed"
+    assert case["provisional_detail"] == "Not held: enforcement failed: access denied"
+    assert case["provisional_unsupported"] == "Not held: it cannot be enforced here"
+    assert case["provisional_would_block"] == "Would be held blocked until its scan is clean"
+
+
+def test_every_toast_ends_with_a_full_stop(said: dict[str, Any]) -> None:
+    assert said["enforce_failed"]["still_applied"] == {
+        "text": "Grant recorded, but the device is still denied: synthetic reason.",
+        "tone": "bad",
+    }
+    for case in ("watch_only_would_apply", "enforcing_applied", "elevated_monitor"):
+        for key in ("approval", "denial"):
+            assert said[case][key]["text"].endswith("."), (case, key)
+
+
+# --- K4: watch-only never claims to change nothing at all ---------------------------------
+
+
+def test_watch_only_strings_say_outside_its_own_folder(said: dict[str, Any]) -> None:
+    case = said["watch_only_would_apply"]
+    for text in (
+        case["change"]["explain"],
+        case["approval"]["text"],
+        case["denial"]["text"],
+        case["pendingNote"],
+    ):
+        assert "outside its own folder" in text, text
+
+
+def test_no_console_string_says_it_changes_nothing_on_this_computer_unqualified() -> None:
+    bare = re.compile(r"(?:changes|changed) nothing on this computer(?! outside its own folder)")
+    for path in sorted((STATIC / "js").rglob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        assert not bare.search(source), path.name
+        assert "nothing was changed on this computer" not in source, path.name
+
+
+# --- K5: monitor mode never claims a block that only enforce mode makes ------------------
+
+
+def test_a_wider_scope_during_a_monitor_mode_lockdown_says_would(said: dict[str, Any]) -> None:
+    for key in ("scope_during_monitor_lockdown", "default_deny_during_monitor_lockdown"):
+        change = said[key]
+        assert change["real"] is False, key
+        assert change["items"] == [{"label": "Would be blocked", "tone": "c-watch", "dashed": True}]
+        assert change["explain"] == "This change blocks nothing yet: PortLock is in monitor mode."
+    # The lockdown itself still blocks for real in monitor mode.
+    assert said["elevated_monitor_lockdown"]["change"]["real"] is True
+
+
+def test_the_port_cool_down_is_blocked_only_when_portlock_blocks(said: dict[str, Any]) -> None:
+    hold = said["port_hold"]
+    assert hold["enforce"] == (
+        "A port that sees too many arrivals in a short time is held blocked for a cool-down. "
+        "If you are sure it is safe, release it early."
+    )
+    assert hold["monitor_lockdown"] == hold["enforce"]
+    assert hold["monitor"] == (
+        "A port that sees too many arrivals in a short time is held for a cool-down. "
+        "PortLock is in monitor mode, so the port is not really blocked. "
+        "If you are sure it is safe, release it early."
+    )
+    assert "watch-only" in hold["watch_only"] and "not really blocked" in hold["watch_only"]
+    assert "portHoldText(state.status)" in js_source("views/enrolment.js")

@@ -151,6 +151,7 @@ __all__ = [
     "AuditWriter",
     "ConnectionView",
     "DecisionView",
+    "DefaultDenyView",
     "DeviceDetail",
     "DeviceView",
     "DirPrivacyLike",
@@ -212,8 +213,13 @@ _ENFORCING_CHANGES = frozenset({CHANGE_ENFORCE_MODE, CHANGE_DEFAULT_DENY, CHANGE
 # Said in the status and the doctor of a watch-only process (``service.daemon`` builds its
 # scanner without the antivirus engines, which would start programs).
 _NO_ANTIVIRUS_NOTE = (
-    "antivirus engines are not used in watch-only: ClamAV and Microsoft Defender would "
-    "start programs, so files are checked only by PortLock's own heuristics and hash lists"
+    "Antivirus engines are not used in watch-only: ClamAV and Microsoft Defender would "
+    "start programs, so files are checked only by PortLock's own heuristics and hash lists."
+)
+# Said wherever default-deny is reported in a watch-only process that finds it stored on.
+_STORED_DEFAULT_DENY_IGNORED = (
+    "A default-deny setting stored by an earlier run is ignored: this process is watch-only "
+    "and denies nothing."
 )
 
 
@@ -784,18 +790,41 @@ class ModeInfo:
 
 @dataclass(frozen=True, slots=True)
 class SettingsView:
-    """``API.md`` 4.16: the configuration and the run-time settings."""
+    """``API.md`` 4.16: the configuration and the run-time settings.
+
+    ``notes`` are sentences about settings that do not take effect as stored (a stored
+    default-deny in a watch-only process).
+    """
 
     config: Mapping[str, Any]
     runtime: Mapping[str, Any]
     effective: Mapping[str, Any]
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "config": dict(self.config),
             "runtime": dict(self.runtime),
             "effective": dict(self.effective),
+            "notes": list(self.notes),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultDenyView:
+    """``API.md`` 6.12 (``GET /default-deny``): default-deny in force, and as stored.
+
+    ``enabled`` is the value in effect. A watch-only process denies nothing, so it is
+    False there even when an earlier run stored it on; ``stored`` keeps that value and
+    ``note`` says that it is ignored.
+    """
+
+    enabled: bool
+    stored: bool
+    note: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"enabled": self.enabled, "stored": self.stored, "note": self.note}
 
 
 @dataclass(frozen=True, slots=True)
@@ -971,6 +1000,15 @@ class _Loaded:
     hash: str
     source: str
     loaded_at: datetime
+
+
+def _sentence(text: str) -> str:
+    """``text`` as a sentence of its own: a capital first letter and a closing stop."""
+    text = text.strip()
+    if not text:
+        return text
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -1397,7 +1435,8 @@ class PortLockService:
         A clean stop puts everything back, an active lockdown included: lockdown is in
         force only while the service runs, its record stays and the next start resumes
         it (ARCHITECTURE D9). With ``fail_closed`` the restrictions stay in place and the
-        journal keeps them for the next start. Safe to call twice.
+        journal keeps them for the next start. A watch-only process restores nothing and
+        leaves the journal file as it found it. Safe to call twice.
         """
         with self._lock:
             if self._stopped or not self._started:
@@ -1413,7 +1452,9 @@ class PortLockService:
                 job.cancel.set()
             self._cancel_queued_scans()
             report: RollbackReport | None = None
-            if not self._config.fail_closed:
+            # A watch-only process changed nothing, so it restores nothing, and it never
+            # rewrites the journal (DESIGN 14.28): a rollback would compact it.
+            if not self._config.fail_closed and not self._watch_only():
                 report = rollback(
                     self._journal,
                     self._live,
@@ -1612,12 +1653,14 @@ class PortLockService:
 
     def get_settings(self) -> SettingsView:
         settings = dict(self._settings)
+        default_deny = self.get_default_deny()
         runtime = {
             "protected_fingerprints": list(settings.get("protected_fingerprints", [])),
             "scan.enabled": bool(settings.get("scan.enabled", self._config.scan.enabled)),
             "lockdown.default_minutes": self._default_lockdown_minutes(),
             "scope": self._scope(),
-            "default_deny": bool(settings.get("default_deny", False)),
+            # The value in effect: a watch-only process reports the stored "on" as off.
+            "default_deny": default_deny.enabled,
         }
         effective = {
             "scan_enabled": self._scanning_available(),
@@ -1626,8 +1669,21 @@ class PortLockService:
             "scope": self._scope(),
             "fail_closed": self._config.fail_closed,
             "baseline_read_only": self._baseline_active,
+            "default_deny": default_deny.enabled,
         }
-        return SettingsView(self._config.to_dict(), runtime, effective)
+        notes = (default_deny.note,) if default_deny.note else ()
+        return SettingsView(self._config.to_dict(), runtime, effective, notes)
+
+    def get_default_deny(self) -> DefaultDenyView:
+        """Default-deny as it is in force (``GET /default-deny``).
+
+        A watch-only process never denies anything (DESIGN 14.28): a setting an earlier,
+        enforcing run stored is reported as off, with a note that it is ignored.
+        """
+        stored = bool(self._settings.get("default_deny", False))
+        if self._watch_only():
+            return DefaultDenyView(False, stored, _STORED_DEFAULT_DENY_IGNORED if stored else None)
+        return DefaultDenyView(stored, stored)
 
     def doctor(self) -> DoctorLike:
         """``portlock doctor``: the guard report with the service checks appended."""
@@ -2662,18 +2718,19 @@ class PortLockService:
             caps = self._live.capabilities()
             can = caps.privileged and caps.block and not self._privacy_problems
             if not caps.privileged or not caps.block:
-                notes.extend(caps.notes or ("the enforcer cannot block devices here",))
+                notes.extend(caps.notes or ("The enforcer cannot block devices here.",))
         notes.extend(self._privacy_problems)
         if self._killswitch_latched:
             source = "killswitch"
-            notes.append("the kill switch disabled enforcement")
+            notes.append("The kill switch disabled enforcement.")
         return ModeInfo(
             mode=mode,
             effective_mode=self._effective_mode(),
             source=source,
             killswitch=self._killswitch_latched,
             can_enforce=can and not self._killswitch_latched,
-            notes=tuple(notes),
+            # The console shows each note as a sentence of its own.
+            notes=tuple(_sentence(note) for note in notes),
             watch_only=reason is not None,
             watch_only_reason=reason,
         )

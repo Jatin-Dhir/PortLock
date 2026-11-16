@@ -26,6 +26,11 @@ its state or configuration directory is **not a system-wide location** (it is in
 user's own profile). This is decided once, at start, and the mode does not change it.
 Files in a user's own folders can be changed by every program that user runs, so a policy
 or journal kept there must never drive the real enforcer, even from an elevated process.
+Which folders count, and how the edge cases fall, is in section 1 ("Where things are").
+The reason PortLock gives is worded for the case at hand: this user's own folders, another
+user's folders, the folder all users share, the home folder of the account that runs it
+(a root installation must not live in `/root`), or a location PortLock cannot confirm is
+local and system-wide.
 
 **What a watch-only process does.** It lists the real USB devices, decides, audits and
 serves the console. It runs no other program (no `icacls`, no `schtasks`, no antivirus),
@@ -42,12 +47,24 @@ and are recorded; nothing is blocked or ejected. Approving a drive, or asking fo
 reads the files on that drive with PortLock's own heuristics and hash lists; it starts no
 antivirus program (`SCANNING.md`).
 
-**If an enforcing PortLock left changes in place** (open journal records, or a lockdown
-that is not idle) in the directories a watch-only process is about to use, that process
-refuses to start: it says so on standard error, names the state directory, tells you to
-start PortLock as administrator or run `portlock recover` as administrator, and exits with
-code 3. It neither enforces nor undoes those changes, and closes no record. With per-user
-directories this cannot happen, because nothing is ever enforced there.
+**If the state directory may hold changes an enforcing PortLock left in place**, a
+watch-only process refuses to start. That is the case for open journal records, a lockdown
+that is not idle, a journal line this version cannot read, and a journal it cannot open:
+it cannot show there is nothing to undo, so it does not start and claim it changes
+nothing. It says so on standard error, names the state directory and what it found, and
+exits with code 3. It neither enforces nor undoes those changes, closes no record and
+leaves the journal exactly as it was (a watch-only process never compacts or rewrites the
+journal). What to do depends on where the directory is:
+
+- **System-wide directories** (you started PortLock without administrator rights): start
+  PortLock as administrator, or run `portlock recover` as administrator, on that
+  installation.
+- **Per-user directories** (your own, another user's or the shared folder): PortLock
+  never enforces from there, and `recover` refuses them, because any program that user
+  runs could have written the journal. Move the folder aside to start afresh, and have an
+  administrator check the computer if the changes could be real. Open records cannot
+  arise there by themselves, since nothing is ever enforced from a per-user folder; an
+  unreadable journal line can.
 
 > **Use an ordinary window, not an administrator one.** Open PowerShell normally, not with
 > "Run as administrator" or "Terminal (Admin)" (on Linux, not with `sudo`). In an
@@ -69,7 +86,13 @@ python -m portlock run
 
 `init` asks for an administrator name and a password (twice) and prints the audit
 verification key and eight recovery codes once. It creates nothing until it has a password
-it accepts, so a refused password costs nothing: run `init` again. `run` prints the console
+it accepts, so a refused password costs nothing: run `init` again. Run `init` before
+`run`, not beside it: while a PortLock service runs on the same state directory, `init`
+refuses before it creates anything and says to stop the service first (a key created
+beside a running service would leave records that can never be verified with it). It
+checks again just before it writes, and holds no lock while it waits for your password.
+A service started before any administrator exists says what to do: stop this service
+(Ctrl+C), run `init`, then start it again. `run` prints the console
 address (`http://127.0.0.1:47600/` unless `[api] port` says otherwise); open it and sign
 in. If the port is taken, `run` names the configuration file and its `[api] port` setting.
 If PortLock is already running, it prints that one's address and how to stop it.
@@ -117,13 +140,32 @@ administrator.
 | Run as an ordinary user (watch-only) | `%LOCALAPPDATA%\PortLock\state` and `...\config` | `$XDG_STATE_HOME/portlock` and `$XDG_CONFIG_HOME/portlock` |
 | Relocate both | `PORTLOCK_HOME=<home>` gives `<home>\state` and `<home>\config`; or set `[paths]` in `portlock.toml`. The file wins over the variable. | same |
 
-Directories inside a user's own profile (`USERPROFILE` on Windows, `HOME` elsewhere) are
-per-user, wherever they come from (the defaults, `PORTLOCK_HOME` or `[paths]`): a process
-using them is watch-only for its whole life, even when elevated, because every program
-that user runs could change them. Another spelling of the profile does not get around
-this: short names (`C:\Users\ALICE~1`), `\\?\` prefixes, `..`, junctions, symbolic links
-and `subst` drives are resolved before comparing, and a UNC or device path, or a profile
-variable that is empty or cannot be resolved, counts as not system-wide.
+Directories inside a user's folders are per-user, wherever they come from (the defaults,
+`PORTLOCK_HOME` or `[paths]`): a process using them is watch-only for its whole life, even
+when elevated, because every program that user runs could change them. A user's folders
+are not only the account that runs PortLock:
+
+- **Windows:** the profile (`USERPROFILE`) and the AppData folders, every profile under
+  the profiles folder (the parent of `USERPROFILE`, so another administrator's profile
+  too), and the shared `PUBLIC` folder.
+- **Linux:** the home directory (`HOME`), everything under `/home` and `/Users`, and, when
+  PortLock runs natively through `sudo`, `doas` or `pkexec`, the home of the account that
+  asked for it (`SUDO_USER`, `DOAS_USER`, `PKEXEC_UID`). If one of those is set and its
+  home cannot be found, the location counts as not system-wide. Root's own home (`/root`)
+  is no place for a root installation either: PortLock is watch-only there and says so.
+
+Another spelling of the profile does not get around this: short names
+(`C:\Users\ALICE~1`), `\\?\` prefixes, `..`, junctions, symbolic links and `subst` drives
+are resolved before comparing. A profile variable that points to a share on **another**
+computer (AppData redirected to a file server with Folder Redirection, say) is skipped,
+because no local directory can lie inside it, so it no longer makes an administrator's
+system-wide installation watch-only. PortLock still fails closed, and counts the location
+as not system-wide, for a `\\?\` or `\\.\` profile path, a UNC path to this computer
+(`localhost`, `127.x`, `::1` or its own name), a UNC `USERPROFILE` or `LOCALAPPDATA`, a
+profile variable that is set but empty, relative or cannot be resolved, and a state or
+configuration directory that is itself a UNC or device path.
+
+
 
 | File | Directory | Purpose |
 | --- | --- | --- |
@@ -155,14 +197,25 @@ outside its own folder. `portlock doctor` shows the result as `guard.state_dir` 
   prints, so on a Windows in another display language it reports the directory as not
   private and enforce mode stays refused (fail closed). That case has not been tried.
 
-Check on Linux (run, under WSL with a throwaway home):
+Check on Linux, as root, on the system-wide directories (**Not run**):
 
 ```
-portlock doctor --offline
+sudo portlock doctor --offline
 ```
 
-Look for `[ok  ] guard.state_dir: the state directory is private`. Before the directories
-exist the check reports `it does not exist`; `portlock init` creates them.
+Look for `guard.state_dir` and `guard.config_dir` reported as `ok` (private). That needs
+root and the system-wide directories (`/var/lib/portlock` and `/etc/portlock`). Before the
+directories exist the check reports that they do not exist; `portlock init` creates them.
+
+Run as an ordinary user, or with a throwaway `PORTLOCK_HOME` (as under WSL), the process
+is watch-only: `doctor` prints these two checks as `info` lines saying they were not
+checked, because a watch-only process neither checks nor changes directory permissions.
+That is expected, not a fault.
+
+```
+[info] guard.state_dir: the state directory was not checked for privacy: watch-only neither checks nor changes directory permissions
+[info] guard.config_dir: the configuration directory was not checked for privacy: watch-only neither checks nor changes directory permissions
+```
 
 Do not run `portlock init` as one user and the service as another: the files would belong
 to the first, and the service would refuse enforce mode. Use the service's account.
@@ -442,7 +495,7 @@ anything, so a failed attempt leaves no kill switch behind. If the service is ru
 file and waits up to 10 seconds for the service to empty the journal; if it does not,
 stop the PortLock process and run `recover` again.
 
-`recover` refuses a per-user installation (directories inside a user's own profile)
+`recover` refuses a per-user installation (directories in a user's folders, section 1)
 before it writes anything, the kill-switch file included: any program that user runs could
 have written that journal, and an elevated `recover` would apply it with the real
 enforcer. A per-user installation is watch-only and never changed anything to restore.
@@ -569,8 +622,9 @@ Backing up the initial audit key and the recovery codes is separate, and offline
 | Symptom | Meaning |
 | --- | --- |
 | `enforce mode refused` alert, `mode` shows `monitor` | a directory is not private; read `portlock doctor` |
-| "PortLock cannot change this computer" (`watch_only`) when switching to enforce, engaging a lockdown or turning default-deny on | this process is watch-only: not elevated, or its directories are in a user's own folders (section 0). Use the system-wide installation from an administrator window |
-| a watch-only `run` refuses to start because an enforcing PortLock left changes | start PortLock as administrator, or run `portlock recover` as administrator, on that installation |
+| "PortLock cannot change this computer" (`watch_only`) when switching to enforce, engaging a lockdown or turning default-deny on | this process is watch-only: not elevated, or its directories are in a user's folders, or their location cannot be confirmed as local and system-wide; the reason says which (sections 0 and 1). Use the system-wide installation from an administrator window |
+| a watch-only `run` refuses to start because an enforcing PortLock may have left changes (open records, a lockdown, or journal lines it cannot read) | system-wide directories: start PortLock as administrator, or run `portlock recover` as administrator, on that installation. Per-user directories: move the folder aside and have an administrator check the computer (section 0) |
+| `init` refuses because a PortLock service is running from that state directory | stop the service (Ctrl+C in its window, or `portlock stop`), run `init`, then start it again |
 | `run` says the port is taken | another program uses it; change `[api] port` in the configuration file it names |
 | a decision says `not enforced` or `unsupported` | the mechanism is unavailable (not root, no such attribute, read-only sysfs) |
 | `cannot be made private` | fix the directory's owner and mode, or the access list, then restart |

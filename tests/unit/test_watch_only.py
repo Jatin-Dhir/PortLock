@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import dataclasses
 import errno
 import http.client
 import io
@@ -48,10 +49,12 @@ from portlock.core import privilege
 from portlock.core import service as service_module
 from portlock.core.clock import FakeClock
 from portlock.core.config import (
+    AuditConfig,
     Config,
     LockdownConfig,
     PathsConfig,
     ScanConfig,
+    config_to_toml,
     default_config,
     load_config,
     paths_per_user,
@@ -113,6 +116,8 @@ NATIVE = "win32" if sys.platform == "win32" else "linux"
 PROGRAM = "python -m portlock"
 SRC = Path(__file__).resolve().parents[2] / "src"
 ALL_ENGINES = ("heuristics", "hashset", "clamav", "defender")
+# How an elevated process names its own profile: root's home on POSIX (C3).
+OWN_WORDS = "own folders" if NATIVE == "win32" else "home folder of the account that runs it"
 
 
 # --- tripwires ------------------------------------------------------------------------------
@@ -322,7 +327,7 @@ def test_an_ordinary_users_start_doctor_and_shutdown_reach_no_seam(
         assert by_id["service.privacy"]["status"] == "info"
         assert "not checked" in by_id["service.privacy"]["summary"]
         assert (
-            "antivirus engines are not used in watch-only"
+            "Antivirus engines are not used in watch-only"
             in (by_id["service.scan_engines"]["detail"])
         )
         seen["types"] = audit_types(runtime)
@@ -609,7 +614,8 @@ def test_an_elevated_process_with_a_per_user_home_is_watch_only(
         assert runtime.posture is not None and runtime.posture.elevated
         assert runtime.watch_only
         reason = runtime.service.get_mode().watch_only_reason
-        assert reason is not None and "own folders" in reason
+        # An elevated process in its own profile: on POSIX that is root's own home (C3).
+        assert reason is not None and OWN_WORDS in reason
         assert "administrator" not in reason
         assert runtime.service.status().to_dict()["enforcer"]["privileged"] is True
 
@@ -1123,7 +1129,8 @@ def test_a_system_wide_location_is_recognised_on_windows() -> None:
         {"USERPROFILE": ""},
         {"USERPROFILE": "   "},
         {"USERPROFILE": "Users\\Alice"},
-        {"APPDATA": "\\\\server\\profiles\\alice"},
+        # A UNC path to this computer is another spelling of a local folder (C1).
+        {"APPDATA": "\\\\localhost\\C$\\Users\\Alice"},
         {"userprofile": "relative"},
     ],
 )
@@ -1141,7 +1148,8 @@ def test_posix_spellings_and_failures() -> None:
     assert per_user("/var/lib/../../home/alice/pl", home)
     assert per_user("/home/alice", home)
     assert not per_user("/var/lib/portlock", home)
-    assert not per_user("/home/alice2/pl", home)
+    # Another user's home is not system-wide either (C2).
+    assert per_user("/home/alice2/pl", home)
     assert not per_user("/var/lib/portlock", {})
     assert not per_user("/var/lib/portlock", {"HOME": "/"})
     assert per_user("/var/lib/portlock", {"HOME": ""})
@@ -1171,7 +1179,9 @@ def _link(link: Path, target: Path) -> None:
 
 
 def test_links_and_aliases_on_this_system_resolve_to_the_profile(tmp_path: Path) -> None:
-    profile = tmp_path / "Profile Of A Person"
+    # The profile lies in a profiles root of its own: everything under the parent of
+    # USERPROFILE is some user's profile (C2), so "system" must be outside it.
+    profile = tmp_path / "Users" / "Profile Of A Person"
     (profile / "pl").mkdir(parents=True)
     system = tmp_path / "system"
     system.mkdir()
@@ -1183,7 +1193,7 @@ def test_links_and_aliases_on_this_system_resolve_to_the_profile(tmp_path: Path)
 
     assert not per_user(system / "state")
     assert per_user(profile / "pl")
-    assert per_user(f"{system}{os.sep}..{os.sep}{profile.name}{os.sep}pl")
+    assert per_user(f"{system}{os.sep}..{os.sep}Users{os.sep}{profile.name}{os.sep}pl")
     # A junction (Windows) or symbolic link (POSIX) from a system-looking place.
     _link(system / "looks-system-wide", profile)
     assert per_user(system / "looks-system-wide" / "pl")
@@ -1323,22 +1333,59 @@ def test_a_refused_password_creates_nothing_and_says_what_to_do(tmp_path: Path) 
     assert "Audit verification key" in out and "No audit verification key" not in out
 
 
-def test_a_key_store_nobody_was_shown_is_set_aside_and_replaced(tmp_path: Path) -> None:
-    assert init(tmp_path)[0] == EXIT_OK
-    state = tmp_path / "home" / "state"
-    # As an older PortLock left it: a database and key store, but no administrator.
-    db = Database(state / "portlock.db")
+def run_before_init(home: Path) -> Path:
+    """``run`` before ``init``: a configuration naming a key store, and a service that made
+    it (its initial key went nowhere) and wrote records with it. Returns the key path."""
+    key = home / "state" / "audit.key"
+    config = dataclasses.replace(make_config(home), audit=AuditConfig(hmac_key_file=key, sinks=()))
+    Path(config.paths.config_dir).mkdir(parents=True)
+    config.paths.config_file.write_text(config_to_toml(config), encoding="utf-8")
+    clock = FakeClock(START)
+    stand_ins = StandIns.create(elevated=False)
+    runtime = build_runtime(
+        config,
+        clock=clock,
+        backend=FakeBackend([], clock=clock, synchronous=True),
+        enforcer=stand_ins.enforcer,
+        timer=stand_ins.timer,
+        dir_privacy=stand_ins.dir_privacy,
+        system_ids=lambda devices: frozenset(),
+    )
     try:
-        db.execute("DELETE FROM auth_users")
+        runtime.service.start(threads=False)
+        runtime.service.stop()
     finally:
-        db.close()
-    old_key = (state / "audit.key").read_bytes()
+        runtime.close()
+    assert key.is_file()
+    return key
+
+
+def shown_key(out: str) -> str:
+    lines = out.splitlines()
+    return lines[lines.index("Audit verification key. Keep it offline: it is shown only now.") + 1]
+
+
+def test_a_key_store_nobody_was_shown_is_set_aside_and_replaced(tmp_path: Path) -> None:
+    key = run_before_init(tmp_path / "home")
+    old_key = key.read_bytes()
     code, out, err = init(tmp_path)
     assert code == EXIT_OK, err
     assert "Audit verification key" in out and "was moved to" in out
+    state = key.parent
     aside = [path for path in state.iterdir() if path.name.startswith("audit.key.unused-")]
     assert len(aside) == 1 and aside[0].read_bytes() == old_key
-    assert (state / "audit.key").read_bytes() != old_key
+    assert key.read_bytes() != old_key
+    # The replacement is audited, and the key that was shown verifies the log offline.
+    db = Database(state / "portlock.db")
+    try:
+        rows = db.query("SELECT data FROM audit_log WHERE event_type = 'config.changed'")
+    finally:
+        db.close()
+    assert any(json.loads(row["data"])["key"] == "audit.key_store" for row in rows)
+    key_file = tmp_path / "shown.key"
+    key_file.write_text(shown_key(out), encoding="utf-8")
+    code, out, err = cli(tmp_path, "audit", "verify", "--offline", "--key-file", str(key_file))
+    assert code == EXIT_OK, out + err
 
 
 def test_init_will_not_replace_a_key_store_a_running_service_holds(tmp_path: Path) -> None:
@@ -1495,7 +1542,7 @@ def test_recover_refuses_a_per_user_home_before_writing_anything(
         tmp_path, "recover", is_elevated=lambda: True, create_enforcer=create_enforcer
     )
     assert code == EXIT_FAILED and "recover does not act on" in err
-    assert "own folders" in err and "Nothing was changed" in err
+    assert OWN_WORDS in err and "Nothing was changed" in err
     assert built == [] and not (home / "config" / "DISABLE_ENFORCEMENT").exists()
     # The same home outside any profile is system-wide: recover goes on to its own checks.
     code, _out, err = cli(

@@ -21,14 +21,44 @@ export function chip(label, tone = "c-neutral", { dashed = false, hatch = false,
   return h("span", { class: `chip ${tone}${dashed ? " dashed" : ""}${hatch ? " hatch" : ""}`, title }, label);
 }
 
-export function accessChip(access) {
+// The title on a dashed State or Decision chip, for the pointer user who hovers it.
+const INTENDED_TITLE = "Intended only: the operating system was not changed";
+
+/** A decision's access. `dashed` when it is intended only (truth.intendedOnly). */
+export function accessChip(access, { dashed = false } = {}) {
   const [label, tone] = ACCESS_TEXT[access] || [access, "c-neutral"];
-  return chip(label, tone);
+  return chip(label, tone, { dashed, title: dashed ? INTENDED_TITLE : null });
 }
 
-export function stateChip(stateName) {
+/** A connection's state. `dashed` when it is intended only (truth.intendedOnly). */
+export function stateChip(stateName, { dashed = false } = {}) {
   const [label, tone] = STATE_TEXT[stateName] || [stateName, "c-neutral"];
-  return chip(label, tone);
+  return chip(label, tone, { dashed, title: dashed ? INTENDED_TITLE : null });
+}
+
+/** The key to the chip styles, worded for this process (truth.chipLegend). */
+export function chipLegendLine(legend) {
+  return h(
+    "p",
+    { class: "legend" },
+    legend.map((item) => [chip(item.label, item.tone, { dashed: item.dashed, hatch: item.hatch }), item.text]),
+  );
+}
+
+/**
+ * The bar at the top of every page (truth.shellBanner decides which). The watch-only bar is
+ * the label and one sentence; the reason sits behind a native "Why" disclosure, which the
+ * keyboard reaches and opens without any script.
+ */
+export function shellBar(bar) {
+  if (!bar) return null;
+  if (bar.kind === "simulation") return h("div", { class: "simbar", role: "status" }, h("span", {}, bar.text));
+  return h(
+    "div",
+    { class: "wobar", role: "region", "aria-label": "Watch-only" },
+    h("p", {}, h("strong", {}, bar.lead), " ", bar.text),
+    h("details", { class: "why" }, h("summary", {}, bar.why), h("p", {}, bar.reason)),
+  );
 }
 
 export function scanChip(scan) {

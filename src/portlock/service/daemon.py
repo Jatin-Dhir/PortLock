@@ -28,6 +28,7 @@ import logging
 import os
 import secrets
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -311,7 +312,11 @@ def build_runtime(
     ensure_private_dir(state_dir)
     ensure_private_dir(config.paths.config_dir)
 
-    journal = RecoveryJournal(state_dir / JOURNAL_FILE_NAME, clock=real_clock)
+    # A watch-only process never writes the journal: it changes nothing to record, and
+    # compacting would erase lines it cannot read that an enforcing PortLock may need.
+    journal = RecoveryJournal(
+        state_dir / JOURNAL_FILE_NAME, clock=real_clock, read_only=stand_ins is not None
+    )
     recovery = _check_database(config.paths.database_file, real_clock)
     db = Database(config.paths.database_file)
     try:
@@ -784,9 +789,11 @@ def run(
     old stop request would end this one at its first tick.
 
     A watch-only process (``guard.watchonly``) builds no real enforcer, timer or
-    directory-privacy object at all: before the database it restores nothing (it never
-    changed anything), and once the database is open it refuses to start if it finds
-    open journal records or a lockdown that is not idle, writing nothing to the journal.
+    directory-privacy object at all, and refuses an injected timer or directory-privacy
+    check (``ValueError``) before it looks at the kill switch. It restores nothing before
+    the database (it never changed anything), and it refuses to start, before anything is
+    created, if it finds open journal records, journal lines it cannot read, a journal it
+    cannot open, or a lockdown that is not idle. It never writes the journal.
     ``seams``, ``elevated`` and ``env`` are passed to :func:`build_runtime`.
     """
     real_clock: Clock = clock if clock is not None else SystemClock()
@@ -810,7 +817,11 @@ def run(
         if not simulation and not injected:
             posture = detect_posture(config, elevated=elevated, env=env, platform=platform)
         watch_only = posture is not None and posture.watch_only
-        privacy: DirPrivacyLike | None = dir_privacy
+        if watch_only and (timer is not None or dir_privacy is not None):
+            # Refused before the kill switch is looked at: with an injected privacy check
+            # the kill switch would otherwise build the real enforcer to roll back.
+            raise ValueError("a watch-only process gets the stand-ins, not an injected seam")
+        privacy: DirPrivacyLike | None = None if watch_only else dir_privacy
         if privacy is None and not watch_only:
             privacy = factory.create_dir_privacy(
                 platform=platform, runner=seams.runner if seams else None
@@ -840,7 +851,11 @@ def run(
         # the kill switch, so it is honoured from the journal file before anything else.
         # A watch-only process skips this: it never changed anything it could restore,
         # and it must not build an enforcer (or a privacy check that runs icacls) to try.
-        if privacy is not None and KillSwitch(config.paths.kill_switch_file, privacy).is_set():
+        if (
+            not watch_only
+            and privacy is not None
+            and KillSwitch(config.paths.kill_switch_file, privacy).is_set()
+        ):
             _pre_database_rollback(
                 config,
                 reason="killswitch",
@@ -848,6 +863,13 @@ def run(
                 backend=raw_backend(),
                 clock=real_clock,
             )
+        if posture is not None and watch_only:
+            # Before build_runtime, which would create a database and an audit key store:
+            # a start that is refused must leave nothing new behind.
+            found = _leftovers_on_disk(config, real_clock)
+            if found:
+                sys.stderr.write(_leftovers_message(posture, state_dir, found, program))
+                return EXIT_STATE_UNUSABLE
         try:
             runtime = build_runtime(
                 config,
@@ -928,20 +950,73 @@ def _already_running(state_dir: Path, program: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _journal_leftovers(journal: RecoveryJournal) -> list[str]:
+    """What the journal holds that a watch-only process can neither undo nor ignore.
+
+    A line this version cannot parse, and a journal that cannot be read (both counted
+    in ``corrupt_lines``), count too: they may describe a change an enforcing PortLock
+    made, and a watch-only process that cannot show there is nothing to undo must not
+    start and claim it changes nothing.
+    """
+    found: list[str] = []
+    try:
+        records = journal.open_records()
+        unreadable = journal.corrupt_lines
+    except Exception as exc:
+        return [f"the recovery journal cannot be read ({type(exc).__name__})"]
+    if records:
+        found.append(f"{len(records)} open record(s) in the recovery journal")
+    if unreadable:
+        found.append(
+            f"{unreadable} line(s) of the recovery journal that this PortLock cannot read, "
+            "or a journal it cannot open"
+        )
+    return found
+
+
+def _leftovers_on_disk(config: Config, clock: Clock) -> list[str]:
+    """:func:`_leftovers`, read from the files alone, creating and changing nothing.
+
+    The journal is replayed without writing. The lockdown record is read only if the
+    database exists, through a connection that writes nothing: an immutable one, so that
+    not even SQLite's ``-wal`` and ``-shm`` files appear, unless a ``-wal`` file is
+    already there (a process that did not close cleanly), whose records must be read. A
+    database that cannot be read here is left to ``build_runtime``, which moves a damaged
+    one aside (DESIGN 14.23) and checks again.
+    """
+    state_dir = Path(config.paths.state_dir)
+    journal = RecoveryJournal(state_dir / JOURNAL_FILE_NAME, clock=clock, read_only=True)
+    found = _journal_leftovers(journal)
+    database = Path(config.paths.database_file)
+    if not database.is_file():
+        return found
+    wal = database.with_name(database.name + "-wal").exists()
+    uri = f"{database.resolve().as_uri()}?{'mode=ro' if wal else 'immutable=1'}"
+    try:
+        with contextlib.closing(sqlite3.connect(uri, uri=True, isolation_level=None)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lockdown_state'"
+            ).fetchone()
+            row = (
+                conn.execute("SELECT state FROM lockdown_state WHERE id = 1").fetchone()
+                if table is not None
+                else None
+            )
+    except sqlite3.Error as exc:
+        _LOG.warning("the lockdown record could not be read before start: %s", exc)
+        return found
+    if row is not None and row[0] != LockdownState.IDLE.value:
+        found.append(f"a lockdown in state {str(row[0])[:40]!r}")
+    return found
+
+
 def _leftovers(runtime: Runtime) -> list[str]:
     """What an enforcing PortLock left in this state directory, read without changing it.
 
     Anything that cannot be read counts as found: a watch-only process that cannot show
     there is nothing to undo must not start and claim it changes nothing.
     """
-    found: list[str] = []
-    try:
-        records = runtime.journal.open_records()
-    except Exception as exc:
-        found.append(f"the recovery journal cannot be read ({type(exc).__name__})")
-    else:
-        if records:
-            found.append(f"{len(records)} open record(s) in the recovery journal")
+    found = _journal_leftovers(runtime.journal)
     try:
         state = runtime.store.get_lockdown().state
     except Exception as exc:
@@ -956,18 +1031,19 @@ def _leftovers_message(
     posture: Posture, state_dir: Path, found: Sequence[str], program: str
 ) -> str:
     what = "; ".join(found)
-    if posture.system_wide:
+    location = posture.location_reason()
+    if location is None:
         advice = (
             f"Start PortLock as administrator, or run '{program} recover' as administrator, "
             "to undo them."
         )
     else:
-        # A per-user folder can be written by any program this user runs, and an
-        # elevated `recover` refuses it: nothing here may invite one.
+        # A folder that is not system-wide can be written by programs other than an
+        # administrator's, and an elevated `recover` refuses it: nothing may invite one.
         advice = (
-            "This folder belongs to this user, so a watch-only PortLock never enforced "
-            "anything here: move the folder aside to start afresh, and have an "
-            "administrator check the computer if these changes are real."
+            f"PortLock never enforces from this folder ({location}): move the folder "
+            "aside to start afresh, and have an administrator check the computer if these "
+            "changes are real."
         )
     return (
         f"portlock: the state directory {state_dir} holds changes an enforcing PortLock "

@@ -333,7 +333,7 @@ def test_a_scan_request_starts_no_program(live: Live, capsys: pytest.CaptureFixt
     status, report = call(live.port, "GET", "/doctor", token=live.token)
     assert status == 200
     engines = next(check for check in report["checks"] if check["id"] == "service.scan_engines")
-    assert "antivirus engines are not used in watch-only" in engines["detail"]
+    assert "Antivirus engines are not used in watch-only" in engines["detail"]
     status, data = call(live.port, "GET", "/devices", token=live.token)
     assert status == 200
     requested = 0
@@ -385,6 +385,32 @@ def wait_until_answering(process: subprocess.Popen[str], port: int) -> None:
     pytest.fail(f"the service did not answer (exit code {process.poll()})")
 
 
+def report_writes(report: Path) -> int:
+    """How many times the flight recorder has written ``report`` (0 before the first)."""
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    writes = data.get("writes") if isinstance(data, dict) else None
+    return writes if isinstance(writes, int) else 0
+
+
+def wait_for_a_report_after_now(process: subprocess.Popen[str], report: Path) -> None:
+    """Wait until the recorder has written ``report`` again, so that what the process did
+    up to now is in it, before the process is killed and can write nothing more.
+
+    The recorder rewrites its report once a second. On a fast machine (a GitHub runner)
+    the service answers well within that second, and a kill right then left no report.
+    """
+    seen = report_writes(report)
+    deadline = time.monotonic() + _START_SECONDS
+    while time.monotonic() < deadline and process.poll() is None:
+        if report_writes(report) > seen:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"the flight recorder wrote no report (exit code {process.poll()})")
+
+
 def use_port(live: Live, port: int) -> None:
     config_file = live.home / "config" / "portlock.toml"
     text, replaced = re.subn(
@@ -415,6 +441,7 @@ def test_a_killed_service_leaves_nothing_that_blocks_the_next_start(
     )
     try:
         wait_until_answering(killed, port)
+        wait_for_a_report_after_now(killed, reports / "killed.json")
     finally:
         killed.kill()
         killed.wait()

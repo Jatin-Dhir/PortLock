@@ -30,6 +30,7 @@ sees ordinary ``Enforcer``, ``ExternalTimer`` and ``DirPrivacy`` objects.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -38,7 +39,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from portlock.core.config import Config, paths_per_user
+from portlock.core.config import (
+    LOCATION_OTHER_USER,
+    LOCATION_OWN,
+    LOCATION_SHARED,
+    LOCATION_UNCONFIRMED,
+    Config,
+    per_user_cause,
+)
 from portlock.core.models import UsbDevice
 from portlock.core.privilege import process_elevated
 from portlock.guard.base import (
@@ -52,6 +60,7 @@ from portlock.guard.safety import MECHANISM_DRY_RUN
 from portlock.guard.seams import MechanismStatus, PrivacyReport, validate_timer_name
 
 __all__ = [
+    "CAUSE_ACCOUNT_HOME",
     "MECHANISM_WATCH_ONLY",
     "NO_ANTIVIRUS_NOTE",
     "WATCH_ONLY_ENGINES",
@@ -63,26 +72,61 @@ __all__ = [
     "WatchOnlyTimer",
     "WouldLog",
     "detect_posture",
+    "location_clause",
 ]
 
 #: The mechanism of a watch-only result that is *not* reported as done (a journal restore).
 MECHANISM_WATCH_ONLY = "watch-only"
-#: The note every watch-only capability report carries.
+#: The note every watch-only capability report carries (a sentence of its own).
 WATCH_ONLY_NOTE = (
-    "watch-only: PortLock records what it would do and changes nothing on this computer "
-    "outside its own folder"
+    "Watch-only: PortLock records what it would do and changes nothing on this computer "
+    "outside its own folder."
 )
 #: The scan engines a watch-only process uses: they run inside PortLock and only read files.
 WATCH_ONLY_ENGINES = frozenset({"heuristics", "hashset"})
-#: Why the antivirus engines are left out in watch-only.
+#: Why the antivirus engines are left out in watch-only (a sentence of its own).
 NO_ANTIVIRUS_NOTE = (
-    "antivirus engines are not used in watch-only: ClamAV and Microsoft Defender would "
-    "start programs, so files are checked only by PortLock's own heuristics and hash lists"
+    "Antivirus engines are not used in watch-only: ClamAV and Microsoft Defender would "
+    "start programs, so files are checked only by PortLock's own heuristics and hash lists."
 )
+#: :attr:`Posture.cause` of an elevated POSIX process whose files are in its own home
+#: (root's ``/root``): the other causes are ``core.config``'s ``LOCATION_*`` values.
+CAUSE_ACCOUNT_HOME = "account_home"
 _PRIVACY_NOT_CHECKED = (
     "not checked: PortLock is watch-only and neither checks nor changes directory permissions"
 )
 _DEFAULT_LOG_SIZE = 256
+# Why the location is not system-wide, as the clause that follows "PortLock cannot change
+# this computer: ...". Every message about the location is worded from one of these.
+_LOCATION_CLAUSES = {
+    LOCATION_OWN: (
+        "its files are in this user's own folders, which every program this user runs could change"
+    ),
+    LOCATION_OTHER_USER: (
+        "its files are in another user's folders, which every program that user runs could change"
+    ),
+    LOCATION_SHARED: (
+        "its files are in the folder all users of this computer share, which every program "
+        "any user runs could change"
+    ),
+    CAUSE_ACCOUNT_HOME: (
+        "its files are in the home folder of the account that runs it, and a root "
+        "installation must not live there"
+    ),
+    LOCATION_UNCONFIRMED: (
+        "it cannot confirm that its files are in a local, system-wide location (they are "
+        "on a network or device path, or a profile variable could not be read)"
+    ),
+}
+
+
+def location_clause(cause: str | None) -> str:
+    """Why a location is not system-wide, as a clause ("its files are in ...").
+
+    ``None`` (a posture built without a cause, as tests do) reads as this user's own
+    folders, the case of every ordinary user.
+    """
+    return _LOCATION_CLAUSES.get(cause or LOCATION_OWN, _LOCATION_CLAUSES[LOCATION_UNCONFIRMED])
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,34 +136,40 @@ class Posture:
     Attributes:
         elevated: the process runs as administrator (Windows) or root.
         system_wide: both the state and the configuration directory are system-wide
-            locations (``core.config.paths_per_user`` is False for them). Anything that
-            cannot be shown to be system-wide counts as not system-wide.
+            locations (``core.config.per_user_cause`` is ``None`` for them). Anything
+            that cannot be shown to be system-wide counts as not system-wide.
+        cause: why the location is not system-wide (``core.config``'s ``LOCATION_*``, or
+            :data:`CAUSE_ACCOUNT_HOME`); ``None`` when it is, or when not known.
     """
 
     elevated: bool
     system_wide: bool
+    cause: str | None = None
 
     @property
     def watch_only(self) -> bool:
         """True if the process can never be trusted to enforce. Never changes."""
         return not (self.elevated and self.system_wide)
 
+    def location_reason(self) -> str | None:
+        """Why the location is not system-wide, as a clause; ``None`` when it is."""
+        return None if self.system_wide else location_clause(self.cause)
+
     def refusal(self) -> str | None:
         """Why PortLock cannot change this computer, in plain words; ``None`` if it can.
 
         The same sentence answers every refused request (enforce mode, a lockdown,
-        default-deny), so it names what PortLock cannot do and why, not one request.
+        default-deny), so it names what PortLock cannot do and why, not one request. The
+        location part is true for the case at hand (:attr:`cause`).
         """
         if not self.watch_only:
             return None
         reasons: list[str] = []
         if not self.elevated:
             reasons.append("it is not running as administrator")
-        if not self.system_wide:
-            reasons.append(
-                "its files are in this user's own folders, which every program this user "
-                "runs could change"
-            )
+        location = self.location_reason()
+        if location is not None:
+            reasons.append(location)
         return (
             "PortLock cannot change this computer: "
             + ", and ".join(reasons)
@@ -130,6 +180,7 @@ class Posture:
         return {
             "elevated": self.elevated,
             "system_wide": self.system_wide,
+            "cause": None if self.system_wide else (self.cause or LOCATION_OWN),
             "watch_only": self.watch_only,
             "reason": self.refusal(),
         }
@@ -146,12 +197,16 @@ def detect_posture(
 
     Args:
         elevated: defaults to asking the operating system (read-only).
-        env / platform: what :func:`~portlock.core.config.paths_per_user` consults.
+        env / platform: what :func:`~portlock.core.config.per_user_cause` consults.
     """
-    return Posture(
-        elevated=process_elevated() if elevated is None else elevated is True,
-        system_wide=not paths_per_user(config.paths, platform=platform, env=env),
-    )
+    is_elevated = process_elevated() if elevated is None else elevated is True
+    cause = per_user_cause(config.paths, platform=platform, env=env)
+    windows = (sys.platform if platform is None else platform) == "win32"
+    if cause == LOCATION_OWN and is_elevated and not windows:
+        # Root's own home (/root): not a user's profile, but no place for the state of
+        # an enforcing service either, and the message must say so.
+        cause = CAUSE_ACCOUNT_HOME
+    return Posture(elevated=is_elevated, system_wide=cause is None, cause=cause)
 
 
 class WouldLog:

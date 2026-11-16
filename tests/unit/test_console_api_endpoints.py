@@ -238,7 +238,7 @@ def test_doctor_settings_mode_scope_and_default_deny_can_be_read_by_everyone(rig
         assert doctor["worst"] in ("ok", "warn", "fail") and doctor["checks"]
         assert any(check["id"].startswith("service.") for check in doctor["checks"])
         settings = client.get("/settings").json
-        assert set(settings) == {"config", "runtime", "effective"}
+        assert set(settings) == {"config", "runtime", "effective", "notes"}
         assert (
             settings["runtime"]["scope"] == "storage"
             and settings["runtime"]["default_deny"] is False
@@ -248,7 +248,7 @@ def test_doctor_settings_mode_scope_and_default_deny_can_be_read_by_everyone(rig
             "scope": "storage",
             "scopes": ["storage", "storage_and_unknown", "all_except_protected"],
         }
-        assert client.get("/default-deny").json == {"enabled": False}
+        assert client.get("/default-deny").json == {"enabled": False, "stored": False, "note": None}
 
 
 def test_the_doctor_report_has_no_serial_numbers(
@@ -1228,9 +1228,9 @@ def test_default_deny_is_a_commit_confirm_change_when_turned_on(
     assert off.status == 200 and off.json["enabled"] is False and off.json["change"] is None
     on = admin.put("/default-deny", {"enabled": True})
     assert on.status == 200 and on.json["change"]["kind"] == "default_deny"
-    assert admin.get("/default-deny").json == {"enabled": True}
+    assert admin.get("/default-deny").json == {"enabled": True, "stored": True, "note": None}
     assert admin.post(f"/changes/{on.json['change']['id']}/cancel").status == 200
-    assert admin.get("/default-deny").json == {"enabled": False}
+    assert admin.get("/default-deny").json == {"enabled": False, "stored": False, "note": None}
 
 
 # --- settings -----------------------------------------------------------------------------

@@ -1800,11 +1800,17 @@ class RecoveryJournal:
     Args:
         path: the journal file (created owner-only on first write).
         clock: timestamps for new records.
+        read_only: never write the file (a watch-only process, DESIGN 14.28): every
+            write raises :class:`StoreError` and compaction does nothing, so lines this
+            version cannot parse stay for a PortLock that can.
     """
 
-    def __init__(self, path: str | os.PathLike[str], *, clock: Clock) -> None:
+    def __init__(
+        self, path: str | os.PathLike[str], *, clock: Clock, read_only: bool = False
+    ) -> None:
         self._path = Path(path)
         self._clock = clock
+        self._read_only = read_only is True
         self._lock = threading.Lock()
         # Open records by id, oldest first (dicts keep insertion order).
         self._open: dict[str, JournalRecord] = {}
@@ -1819,6 +1825,11 @@ class RecoveryJournal:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def read_only(self) -> bool:
+        """True if this handle never writes the file."""
+        return self._read_only
 
     @property
     def corrupt_lines(self) -> int:
@@ -2031,6 +2042,8 @@ class RecoveryJournal:
         self._closed_since_compaction += 1
 
     def _append_locked(self, records: Sequence[Mapping[str, Any]]) -> None:
+        if self._read_only:
+            raise StoreError(f"the enforcement journal {self._path} is read-only here")
         data = b"".join(canonicalize(record).encode("utf-8") + b"\n" for record in records)
         if self._needs_newline:
             data = b"\n" + data
@@ -2060,6 +2073,8 @@ class RecoveryJournal:
                 _LOG.warning("journal compaction failed: %s", exc)
 
     def _compact_locked(self) -> None:
+        if self._read_only:
+            return
         data = b"".join(
             canonicalize(record.to_json()).encode("utf-8") + b"\n" for record in self._open.values()
         )

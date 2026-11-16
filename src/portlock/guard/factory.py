@@ -694,7 +694,7 @@ def _posture_checks(config: Config, posture: Posture) -> list[DoctorCheck]:
             "watch-only: PortLock shows and records your USB devices and changes nothing on"
             " this computer outside its own folder; nothing is blocked, ejected or made"
             " read-only, and no command is run",
-            f"{reason} {NO_ANTIVIRUS_NOTE[0].upper()}{NO_ANTIVIRUS_NOTE[1:]}.",
+            f"{reason} {NO_ANTIVIRUS_NOTE}",
         )
     else:
         mode = DoctorCheck(
@@ -704,10 +704,11 @@ def _posture_checks(config: Config, posture: Posture) -> list[DoctorCheck]:
             " so it uses the enforcement mechanisms below (in monitor mode it blocks only an"
             " engaged lockdown)",
         )
+    location = posture.location_reason()
     where = (
         "system-wide directories"
-        if posture.system_wide
-        else "directories that are not system-wide (this user's own, or not provably local)"
+        if location is None
+        else f"directories that are not system-wide ({location})"
     )
     directories = DoctorCheck(
         "guard.directories",

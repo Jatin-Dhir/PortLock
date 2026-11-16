@@ -2478,9 +2478,9 @@ class _Endpoints:
         )
 
     def default_deny_get(self, request: Request) -> Response:
-        return Response(
-            200, {"enabled": bool(self.svc.get_settings().runtime.get("default_deny", False))}
-        )
+        # The value in effect: a watch-only process reports a stored "on" as off, with
+        # a note (DESIGN 14.28).
+        return Response(200, self.svc.get_default_deny().to_dict())
 
     def default_deny_put(self, request: Request) -> Response:
         fields = request.fields()

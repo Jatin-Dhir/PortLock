@@ -6,7 +6,7 @@ import { ApiError, api } from "../api.js";
 import { h, replace } from "../dom.js";
 import { countdown, plural, timeEl } from "../fmt.js";
 import { can, refreshChanges, scope, setChanges, setLockdown, setMode, state } from "../store.js";
-import { POSTURE_TEXT, isWatchOnly, posture, watchOnlyReason } from "../truth.js";
+import { POSTURE_TEXT, WATCH_ONLY_CONTROL_NOTE, isWatchOnly, modeNotes, posture, watchOnlyReason } from "../truth.js";
 import { button, checkbox, chip, confirmDialog, errorState, field, formDialog, kv, loading, pageHead, panel, reasonFor, select, textInput, toast } from "../ui.js";
 
 const SCOPES = {
@@ -18,10 +18,11 @@ const SCOPES = {
 const POSTURE_TONE = { watch_only: "c-watch", monitor: "c-watch", enforce: "c-enforce", lockdown: "c-lock" };
 
 // Enforce mode, default-deny and the lockdown are refused by a watch-only service (409
-// `watch_only`). The controls are disabled there with this reason beside them; should one be
+// `watch_only`). The controls are disabled there with a short note beside them that points
+// at the reason behind the bar's "Why", instead of repeating it three times; should one be
 // used anyway, the service's own reason is shown, never a generic error.
 function notHere() {
-  return `Not available: ${watchOnlyReason(state.status)}`;
+  return WATCH_ONLY_CONTROL_NOTE;
 }
 
 async function unlessWatchOnly(action) {
@@ -107,16 +108,16 @@ export function mount(root) {
         ["Chosen by", { config: "the configuration file", setting: "an administrator in the console", killswitch: "the kill switch" }[mode.source] || mode.source],
       ]),
       mode.killswitch ? h("p", { class: "note bad" }, "The kill switch file is present, so enforcement is off and PortLock stays in monitor mode until it is removed.") : null,
-      mode.notes.map((note) => h("p", { class: "note warn" }, note)),
-      h(
-        "p",
-        { class: "muted" },
-        watchOnly
-          ? "PortLock only shows and records what it would block. It changes nothing on this computer outside its own folder."
-          : enforcing
-            ? "PortLock blocks devices policy has not approved."
-            : "PortLock only records what it would block. Nothing on this machine is changed.",
-      ),
+      // The watch-only reason is one of the notes; it is behind the bar's "Why" already.
+      modeNotes(mode).map((note) => h("p", { class: "note warn" }, note)),
+      // In watch-only the page heading already says what this line would.
+      watchOnly
+        ? null
+        : h(
+            "p",
+            { class: "muted" },
+            enforcing ? "PortLock blocks devices policy has not approved." : "PortLock only records what it would block. Nothing on this machine is changed.",
+          ),
       h(
         "div",
         { class: "row" },
@@ -215,7 +216,7 @@ export function mount(root) {
       const engage = button("Engage lockdown…", { tone: "danger", disabled: true });
       replace(
         lockHost,
-        h("p", { class: "muted" }, "A lockdown blocks all removable storage and denies new devices at once. PortLock is watch-only on this computer, so it cannot engage one here."),
+        h("p", { class: "muted" }, "A lockdown blocks all removable storage and denies new devices at once."),
         h("div", { class: "row" }, engage, reasonFor(engage, notHere())),
       );
       return;
@@ -382,7 +383,7 @@ export function mount(root) {
     pageHead(
       "Protection",
       isWatchOnly(state.status)
-        ? "PortLock is watch-only on this computer: it shows and records, and blocks nothing. Enforce mode, default-deny and the emergency lockdown are not available here."
+        ? "PortLock is watch-only on this computer: it shows and records, and blocks nothing. Enforce mode, default-deny and the emergency lockdown are not available."
         : "Monitor only watches. Enforce blocks. Lockdown blocks all removable storage in an emergency. Changes that could lock you out are undone unless you confirm them.",
     ),
     nowHost,

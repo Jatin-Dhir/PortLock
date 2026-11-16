@@ -12,8 +12,11 @@ agent means a protection the operator believes is on and is not. Every problem i
 is reported at once, each with its exact dotted path, so a broken file is fixed in one
 pass.
 
-Nothing in this module creates a directory, writes a file or asks the machine for its
-host name. ``host_label`` is whatever the operator chose.
+Nothing in this module creates a directory or writes a file. ``host_label`` is whatever
+the operator chose. Only :func:`per_user_cause` asks the running system anything: it
+resolves paths, asks for this computer's own name (to tell a UNC path to this computer
+from one to a file server) and, on POSIX, looks up the home directory of the account that
+started ``sudo``.
 
 Where the directories come from, highest precedence first:
 
@@ -25,7 +28,8 @@ Where the directories come from, highest precedence first:
 4. for an ordinary user, a per-user default: ``%LOCALAPPDATA%/PortLock/state`` and
    ``.../config`` on Windows, ``$XDG_STATE_HOME/portlock`` and ``$XDG_CONFIG_HOME/portlock``
    (``~/.local/state`` and ``~/.config`` when unset) elsewhere. A per-user installation
-   is watch-only: :func:`paths_per_user` tells the guard layer so.
+   is watch-only: :func:`paths_per_user` and :func:`per_user_cause` tell the guard layer
+   so, and why.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import ntpath
 import os
 import posixpath
 import re
+import socket
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -54,6 +59,10 @@ __all__ = [
     "DATABASE_FILE_NAME",
     "HOME_ENV",
     "KILL_SWITCH_FILE_NAME",
+    "LOCATION_OTHER_USER",
+    "LOCATION_OWN",
+    "LOCATION_SHARED",
+    "LOCATION_UNCONFIRMED",
     "MAX_CONFIG_BYTES",
     "SCAN_ENGINES",
     "SCOPES",
@@ -75,7 +84,17 @@ __all__ = [
     "default_config",
     "load_config",
     "paths_per_user",
+    "per_user_cause",
 ]
+
+#: :func:`per_user_cause`: inside the current user's own profile or home.
+LOCATION_OWN = "own"
+#: :func:`per_user_cause`: inside another user's profile or home.
+LOCATION_OTHER_USER = "other_user"
+#: :func:`per_user_cause`: inside the folder every user shares (``PUBLIC``).
+LOCATION_SHARED = "shared"
+#: :func:`per_user_cause`: not provably local and system-wide (fail closed).
+LOCATION_UNCONFIRMED = "unconfirmed"
 
 #: Environment variable that relocates both directories under one home.
 HOME_ENV = "PORTLOCK_HOME"
@@ -853,47 +872,257 @@ def paths_per_user(
 ) -> bool:
     """True unless both directories are provably system-wide locations.
 
-    A directory is per-user when it lies inside the current user's own profile: on
-    Windows ``USERPROFILE``, ``LOCALAPPDATA`` and ``APPDATA`` (a profile whose application
-    data was redirected), elsewhere ``HOME`` unless it is ``/``. Such a directory belongs
-    to the user, and every program the user runs can change it, so it cannot hold the
-    state of an enforcing service: a process using it is watch-only (``guard.watchonly``).
+    The same answer as ``per_user_cause(...) is not None``; see :func:`per_user_cause`.
+    """
+    return per_user_cause(paths, platform=platform, env=env) is not None
 
-    Another spelling of the profile must not pass for a system-wide location. When
+
+def per_user_cause(
+    paths: PathsConfig, *, platform: str | None = None, env: Mapping[str, str] | None = None
+) -> str | None:
+    """Why the directories are not a system-wide location, or ``None`` when they are.
+
+    The answer is one of:
+
+    * :data:`LOCATION_OWN`: a directory lies inside the current user's own profile. On
+      Windows ``USERPROFILE``, ``LOCALAPPDATA`` and ``APPDATA`` (a profile whose
+      application data was redirected), elsewhere ``HOME`` unless it is ``/``.
+    * :data:`LOCATION_OTHER_USER`: a directory lies inside another user's profile. On
+      Windows everything under the profiles root (the parent of ``USERPROFILE``); on
+      POSIX everything under ``/home`` and ``/Users`` and, on the running system, the
+      home directory of the user who started ``sudo``, ``doas`` or ``pkexec``
+      (``SUDO_USER``, ``DOAS_USER``, ``PKEXEC_UID``). An elevated window opened with
+      another administrator's credentials, or ``sudo PORTLOCK_HOME=/home/alice/pl``,
+      must not class that user's folder as system-wide.
+    * :data:`LOCATION_SHARED`: a directory lies inside the folder every user shares
+      (``PUBLIC`` on Windows).
+    * :data:`LOCATION_UNCONFIRMED`: the location cannot be shown to be local and
+      system-wide (see below).
+
+    Every program the user in question runs can change such a directory, so it cannot
+    hold the state of an enforcing service: a process using it is watch-only
+    (``guard.watchonly``).
+
+    Another spelling of a profile must not pass for a system-wide location. When
     ``platform`` is the running system, both sides are resolved with
     :func:`os.path.realpath` (8.3 short names, ``..``, junctions, symbolic links and
     ``subst`` drives all resolve to the real profile). For a foreign ``platform`` (tests)
-    only the names are compared, after normalisation. It fails closed: a UNC or
-    device-namespace path (``\\\\server\\share``, ``\\\\?\\C:\\...``, ``\\\\.\\...``),
-    a relative path, or a profile variable that is set but empty, relative or
-    unresolvable makes the answer True.
+    only the names are compared, after normalisation.
+
+    It fails closed (:data:`LOCATION_UNCONFIRMED`): a UNC or device-namespace candidate
+    directory (``\\\\server\\share``, ``\\\\?\\C:\\...``, ``\\\\.\\...``) or a relative
+    one; a profile variable that is set but empty, relative or unresolvable; a
+    ``USERPROFILE`` or ``LOCALAPPDATA`` that is a UNC path; a device-namespace profile
+    variable; a profile variable that is a UNC path to this computer (``localhost``,
+    ``127.x``, ``::1``, the computer's own name); a ``SUDO_USER``, ``DOAS_USER`` or
+    ``PKEXEC_UID`` whose home directory cannot be found. A redirected ``APPDATA`` or
+    ``PUBLIC`` that is a UNC path to *another* computer (Folder Redirection on a domain
+    PC) is skipped instead: no local directory can lie inside it.
     """
     resolved_platform = sys.platform if platform is None else platform
     resolved_env = os.environ if env is None else env
     windows = _is_windows(resolved_platform)
     native = windows == (sys.platform == "win32")
-    roots: list[str] = []
-    for name in ("USERPROFILE", "LOCALAPPDATA", "APPDATA") if windows else ("HOME",):
-        value = _env_value(resolved_env, name, windows=windows)
-        if value is None:
-            continue
-        root = _comparable(value, windows=windows, native=native)
-        if root is None:
-            return True
-        if not windows and root == "/":
-            # Root's home is "/" on many systems: that is the whole disk, not a profile.
-            continue
-        roots.append(root)
+    try:
+        roots = _profile_roots(resolved_env, windows=windows, native=native)
+    except _Unconfirmed:
+        return LOCATION_UNCONFIRMED
     for directory in (paths.state_dir, paths.config_dir):
         # A POSIX path held in a Windows ``Path`` (tests on Windows) prints with
         # backslashes; ``as_posix`` gives back the name as written.
         text = str(directory) if windows else PurePath(directory).as_posix()
         candidate = _comparable(text, windows=windows, native=native)
         if candidate is None:
-            return True
-        if any(_within(candidate, root, windows=windows) for root in roots):
-            return True
-    return False
+            return LOCATION_UNCONFIRMED
+        for cause, root in roots:
+            if _within(candidate, root, windows=windows):
+                return cause
+    return None
+
+
+class _Unconfirmed(Exception):
+    """A profile variable makes the location impossible to confirm (fail closed)."""
+
+
+#: Profile variables that Folder Redirection may point at a file server. A UNC value that
+#: names another computer is skipped; ``USERPROFILE`` and ``LOCALAPPDATA`` never are.
+_REDIRECTABLE = frozenset({"APPDATA", "PUBLIC"})
+#: The variables naming the account that started an elevating command (POSIX).
+_ELEVATING_USERS = ("SUDO_USER", "DOAS_USER")
+
+
+def _profile_roots(env: Mapping[str, str], *, windows: bool, native: bool) -> list[tuple[str, str]]:
+    """``(cause, comparable root)`` pairs, most specific first.
+
+    Raises:
+        _Unconfirmed: a variable is set but cannot be used (fail closed).
+    """
+    own: list[str] = []
+    shared: list[str] = []
+    others: list[str] = []
+    invoking: list[str] = []
+    if windows:
+        for name in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+            root = _variable_root(env, name, windows=True, native=native)
+            if root is not None:
+                own.append(root)
+        profile = _variable_root(env, "USERPROFILE", windows=True, native=native)
+        if profile is not None:
+            others.append(ntpath.dirname(profile.rstrip("\\")) or profile)
+        public = _variable_root(env, "PUBLIC", windows=True, native=native)
+        if public is not None:
+            shared.append(public)
+    else:
+        home = _variable_root(env, "HOME", windows=False, native=native)
+        if home is not None and home != "/":
+            # Root's home is "/" on many systems: that is the whole disk, not a profile.
+            own.append(home)
+        for fixed in ("/home", "/Users"):
+            root = _comparable(fixed, windows=False, native=native)
+            if root is None:
+                raise _Unconfirmed(fixed)
+            others.append(root)
+        if native:
+            for account_home in _elevating_homes(env):
+                root = _comparable(account_home, windows=False, native=True)
+                if root is None or root == "/":
+                    raise _Unconfirmed(account_home)
+                invoking.append(root)
+    # The invoking user's home comes first: a sudo that keeps HOME would otherwise make
+    # that user's folder look like the elevated account's own.
+    return (
+        [(LOCATION_OTHER_USER, root) for root in invoking]
+        + [(LOCATION_OWN, root) for root in own]
+        + [(LOCATION_SHARED, root) for root in shared]
+        + [(LOCATION_OTHER_USER, root) for root in others]
+    )
+
+
+def _variable_root(env: Mapping[str, str], name: str, *, windows: bool, native: bool) -> str | None:
+    """The comparable form of one profile variable; ``None`` when unset or skipped.
+
+    Raises:
+        _Unconfirmed: set but empty, relative, unresolvable, a device-namespace path, a
+            UNC path where none is allowed, or a UNC path to this computer.
+    """
+    value = _env_value(env, name, windows=windows)
+    if value is None:
+        return None
+    if windows:
+        server = _unc_server(value)
+        if server is not None and name in _REDIRECTABLE:
+            if _remote_server(server, env, native=native):
+                return None
+            raise _Unconfirmed(name)
+    root = _comparable(value, windows=windows, native=native)
+    if root is not None:
+        return root
+    if windows and native and name in _REDIRECTABLE:
+        # A mapped network drive resolves to a UNC path: skip it when it names another
+        # computer, exactly as if the variable had been written that way.
+        with contextlib.suppress(OSError, ValueError):
+            resolved_server = _unc_server(os.path.realpath(value))
+            if resolved_server is not None and _remote_server(resolved_server, env, native=True):
+                return None
+    raise _Unconfirmed(name)
+
+
+def _unc_server(text: str) -> str | None:
+    """The server of a ``\\\\server\\share`` path, ``None`` for anything else.
+
+    A device-namespace path (``\\\\?\\``, ``\\\\.\\``) or a UNC path without a server and
+    a share gives ``None`` here and fails closed in :func:`_comparable`.
+    """
+    normal = text.replace("/", "\\")
+    if not normal.startswith("\\\\") or normal.startswith(("\\\\?\\", "\\\\.\\")):
+        return None
+    parts = normal[2:].split("\\")
+    if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+        return None
+    return parts[0].strip()
+
+
+def _remote_server(server: str, env: Mapping[str, str], *, native: bool) -> bool:
+    """True only if ``server`` provably names another computer (fail closed)."""
+    name = server.lower().strip("[]")
+    if not name or name in (".", "?") or name == "localhost" or name.startswith("localhost."):
+        return False
+    if name.endswith(".ipv6-literal.net"):
+        # Windows' spelling of an IPv6 address in a UNC path: 0--1.ipv6-literal.net is ::1.
+        name = name[: -len(".ipv6-literal.net")].replace("-", ":").replace("s", "%")
+    try:
+        address = ipaddress.ip_address(name.split("%", 1)[0])
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.is_loopback or address.is_unspecified:
+            return False
+        return str(address) not in _own_addresses(native=native)
+    own_names = {
+        value.strip().lower()
+        for key, value in env.items()
+        if key.upper() == "COMPUTERNAME" and value.strip()
+    }
+    if native:
+        with contextlib.suppress(OSError):
+            host = socket.gethostname().strip().lower()
+            if host:
+                own_names.update({host, host.split(".", 1)[0]})
+    return name not in own_names and name.split(".", 1)[0] not in own_names
+
+
+def _own_addresses(*, native: bool) -> frozenset[str]:
+    """The addresses this computer's own name resolves to (running system only)."""
+    if not native:
+        return frozenset()
+    try:
+        _name, _aliases, addresses = socket.gethostbyname_ex(socket.gethostname())
+    except (OSError, UnicodeError):
+        return frozenset()
+    return frozenset(addresses)
+
+
+def _elevating_homes(env: Mapping[str, str]) -> list[str]:
+    """The home directories of the accounts that started sudo, doas or pkexec.
+
+    The account this process runs as is left out (root running ``sudo`` names itself):
+    its home is this account's own, decided by ``HOME``.
+
+    Raises:
+        _Unconfirmed: one of those variables is set but its account cannot be found.
+    """
+    homes: list[str] = []
+    for name in (*_ELEVATING_USERS, "PKEXEC_UID"):
+        value = env.get(name)
+        if value is None:
+            continue
+        found = _account_home(value.strip(), by_uid=name == "PKEXEC_UID")
+        if found is None:
+            raise _Unconfirmed(name)
+        uid, home = found
+        if uid != _effective_uid():
+            homes.append(home)
+    return homes
+
+
+def _effective_uid() -> int | None:
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid() if geteuid is not None else None
+
+
+def _account_home(account: str, *, by_uid: bool) -> tuple[int, str] | None:
+    """``(uid, home directory)`` of a local account, ``None`` when it cannot be found."""
+    try:
+        import pwd  # POSIX only, and only needed here
+    except ImportError:
+        return None
+    try:
+        entry = pwd.getpwuid(int(account, 10)) if by_uid else pwd.getpwnam(account)
+    except (KeyError, ValueError, OverflowError):
+        return None
+    if not entry.pw_dir:
+        return None
+    return entry.pw_uid, entry.pw_dir
 
 
 def _env_value(env: Mapping[str, str], name: str, *, windows: bool) -> str | None:

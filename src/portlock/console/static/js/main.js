@@ -10,7 +10,7 @@ import { mountChangeBar } from "./changebar.js";
 import { mountSignin } from "./signin.js";
 import { loadAll, resetState, state, can, scope } from "./store.js";
 import { shellBanner } from "./truth.js";
-import { errorState, toast } from "./ui.js";
+import { errorState, shellBar, toast } from "./ui.js";
 
 const VIEWS = [
   { path: "overview", label: "Overview", module: "./views/overview.js" },
@@ -55,16 +55,7 @@ async function showSignin(notice) {
  * so only the simulation bar can show there.
  */
 function banner() {
-  const bar = shellBanner({ simulation: state.simulation, status: state.status });
-  if (!bar) return null;
-  if (bar.kind === "simulation") return h("div", { class: "simbar", role: "status" }, h("span", {}, bar.text));
-  return h(
-    "div",
-    { class: "wobar", role: "region", "aria-label": "Watch-only" },
-    h("strong", {}, bar.lead),
-    h("span", {}, bar.text),
-    h("span", { class: "why" }, `Why: ${bar.reason}`),
-  );
+  return shellBar(shellBanner({ simulation: state.simulation, status: state.status }));
 }
 
 async function signedIn(reply) {

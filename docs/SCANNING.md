@@ -164,7 +164,7 @@ PortLock asks an installed product to scan the mounted volume and translates wha
 prints into findings (`portlock.scan.av`).
 
 **Not in a watch-only process.** A PortLock that is watch-only (not elevated, or its files
-in a user's own folders; `OPERATIONS.md` section 0) builds its scanner without the ClamAV
+in a user's folders; `OPERATIONS.md` sections 0 and 1) builds its scanner without the ClamAV
 and Defender adapters. Its scans keep only the two engines that run inside PortLock and
 read files: the heuristics and the hash lists. Approving a drive, or asking for a scan,
 therefore reads the files on that drive and starts no program. `portlock doctor` and the
