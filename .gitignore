@@ -1,10 +1,37 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.vscode/
-*.log
-.env
-dist/
+*.py[cod]
+*.egg-info/
+.eggs/
 build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and local configuration
+.env
+*.key
+*.pem
+
+# PortLock runtime state. Never commit these: audit databases and device records hold
+# real device serial numbers.
+*.db
+*.db-wal
+*.db-shm
+*.log
+/state/
+/data/
+
+# Packaging
 *.exe

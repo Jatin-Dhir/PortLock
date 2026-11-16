@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portlock"
+dynamic = ["version"]
+description = "Removable-device security and access control: detect, decide, enforce, audit."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Jatin Dhir" }]
+keywords = ["usb", "security", "device-control", "endpoint", "audit"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: System :: Hardware :: Universal Serial Bus (USB)",
+]
+# The runtime uses the standard library only. Keep it that way: every dependency of a
+# privileged security agent is attack surface.
+dependencies = []
+
+[project.optional-dependencies]
+# Ed25519 signatures for exported audit checkpoints and ClawNet event publishing.
+signing = ["cryptography>=42"]
+dev = ["pytest>=8", "ruff>=0.6", "cryptography>=42"]
+
+[project.scripts]
+portlock = "portlock.console.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Jatin-Dhir/PortLock"
+
+[tool.setuptools.dynamic]
+version = { attr = "portlock.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+portlock = ["py.typed", "console/static/*", "console/static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "hardware: reads real device information from this machine without changing anything; skipped unless --run-hardware is given",
+  "linux_only: needs a Linux kernel; skipped elsewhere",
+  "windows_only: needs Windows; skipped elsewhere",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "C4", "SIM", "RUF"]
+ignore = [
+  "S603", # subprocess calls are reviewed individually; arguments are never shell strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S311"]
