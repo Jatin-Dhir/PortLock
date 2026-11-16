@@ -30,6 +30,18 @@ A PortLock that detects and decides but cannot enforce is a monitor, and it says
   backing the system volume are *protected*. Every enforcement call passes through one
   choke point (`SafeEnforcer`) that refuses to act on a protected device, whatever policy
   says. Enforcing against HID devices is off unless two separate settings are enabled.
+  Input devices present when the service starts are remembered by fingerprint and stay
+  protected, so re-plugging the operator's own keyboard can never lock them out.
+
+  One deliberate exception: a device that pairs **storage with an input interface** is not
+  covered by the keyboard protection. It is treated as storage, and the default policy
+  denies it and raises an alert, because that is the shape of a "BadUSB" stick. A device
+  of that shape that was already present at start-up stays protected like any other
+  start-up input device.
+
+  The cost of this principle is stated plainly: with default settings PortLock does **not**
+  stop a malicious device that presents itself only as a keyboard. It records and alerts
+  on new input devices; blocking them is the opt-in HID enforcement mode.
 - **Nothing destructive.** PortLock never formats, repartitions, wipes or deletes. Blocking
   a device means the OS stops talking to it; the data on it is untouched.
 - **Every change is reversible and journaled.** Before changing an OS setting PortLock
