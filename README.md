@@ -78,8 +78,14 @@ Demonstrated:
   `python -m pytest --run-hardware tests/hardware`); it passes on Windows and, with no USB
   bus, under WSL.
 - The console was opened in a browser against that real watch-only service: the
-  watch-only bar, "Watch-only: nothing is being blocked", and the enforce, default-deny
-  and lockdown controls disabled with the reason beside each.
+  watch-only bar, "Watch-only: nothing is being blocked", and the enforce, default-deny and lockdown controls disabled with the reason beside each.
+- A USB storage device was plugged in while the real watch-only service ran (17 November
+  2026, by the owner, on that Windows 11 machine, with the committed version `36012b4`
+  set up by typing the password at the `init` prompt). It appeared in the console as
+  pending. The service's own records, read afterwards without identifiers, show one
+  connection that was not present at start, of category storage with one mounted volume,
+  in state pending under the default policy, and one `enforcement.would_apply` audit
+  record: what it would have done, with nothing blocked.
 
 Not demonstrated:
 
@@ -97,8 +103,9 @@ Not demonstrated:
   private with `icacls` at every start; none of that was done. As an ordinary user it runs
   watch-only, probes nothing and runs no command; that was run on one Windows machine.
   Under WSL it ran and said what it should: no USB bus, not root.
-- **A device plugged in or removed while the real service runs.** The live tests list the
-  devices that are present and never see one arrive.
+- **A device removed while the real service runs**, and any arrival beyond the single one
+  listed above. The live tests list the devices that are present and never see one
+  arrive.
 - **A Windows with a display language other than English.** The directory-privacy check
   reads the names `icacls` prints; on another language it reports the directory as not
   private and refuses enforce mode (it fails closed), but this was not tried.
@@ -214,7 +221,8 @@ source folder also lets Python write `__pycache__` folders inside `src`.
 These commands were run on one Windows 11 machine, as an ordinary user, with
 `PORTLOCK_HOME` pointing at a throwaway folder, a different port set in that folder's
 `portlock.toml`, and the password given on standard input (`init --password-stdin`)
-instead of typed; the typed prompt is covered only by unit tests with an injected prompt.
+instead of typed. The owner later set it up on that machine by typing the password at
+the prompt.
 Enforce mode has never been tried on real hardware.
 
 ## Quick start

@@ -168,7 +168,14 @@ the test, fixed in `36012b4`). The fourth pass (`c7484fb`) then passed the same 
 - The console was opened in a browser against the real watch-only service: the watch-only
   bar, "Watch-only: nothing is being blocked", and the enforce, default-deny and lockdown
   controls disabled with the reason.
-- **Not done:** a device plugged in or removed while the real service runs.
+- A USB storage device was plugged in while the real watch-only service ran (17 November
+  2026, by the owner, on that Windows 11 machine, with the committed version `36012b4`
+  set up by typing the password at the `init` prompt). It appeared in the console as
+  pending. The service's own records, read afterwards without identifiers, show one
+  connection that was not present at start, of category storage with one mounted volume,
+  in state pending under the default policy, and one `enforcement.would_apply` audit
+  record: what it would have done, with nothing blocked.
+- **Not done:** a device removed while the real service runs.
 - **Not verified:** any enforcement mechanism on a real device; the generated systemd unit
   (never loaded by systemd); the Windows scheduled-task and `icacls` command lines (marked
   UNVERIFIED in the code); `portlock doctor`, `run` and `status` on an elevated,
