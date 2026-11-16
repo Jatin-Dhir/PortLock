@@ -30,7 +30,7 @@ dependencies = []
 [project.optional-dependencies]
 # Ed25519 signatures for exported audit checkpoints and ClawNet event publishing.
 signing = ["cryptography>=42"]
-dev = ["pytest>=8", "ruff>=0.6", "cryptography>=42"]
+dev = ["pytest>=8", "ruff==0.17.5", "cryptography>=42"]
 
 [project.scripts]
 portlock = "portlock.console.cli:main"
